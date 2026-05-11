@@ -1,8 +1,11 @@
 import { createAppError, isAppError } from "./errors";
 import {
   normalizePromptDocument,
+  type NormalizePromptDocumentOptions,
+  type SourceImage,
   type PromptDocument
 } from "./promptDocument";
+import type { PromptTemplate } from "./promptTemplates";
 
 const CHAT_COMPLETIONS_PATH = "/v1/chat/completions";
 const REQUEST_TIMEOUT_MS = 60_000;
@@ -34,13 +37,33 @@ export interface AnalyzeImageInput {
   sourcePageUrl?: string;
   sourceTitle?: string;
   sourceImageUrl?: string;
+  template?: PromptTemplate;
   signal?: AbortSignal;
   onProgress?: (event: ApiProgressEvent) => void;
+}
+
+export interface AnalyzeImageMixInput {
+  images: Array<{
+    imageUrl: string;
+    sourceImageUrl: string;
+    sourcePageUrl?: string;
+    sourceTitle?: string;
+  }>;
+  template?: PromptTemplate;
+  signal?: AbortSignal;
+  onProgress?: (event: ApiProgressEvent) => void;
+}
+
+export interface EditVisualReference {
+  imageUrl: string;
+  sourceImageUrl?: string;
 }
 
 export interface EditPromptInput {
   document: PromptDocument;
   instruction: string;
+  template?: PromptTemplate;
+  visualReferences?: EditVisualReference[];
   signal?: AbortSignal;
   onProgress?: (event: ApiProgressEvent) => void;
 }
@@ -106,6 +129,7 @@ const EDIT_SYSTEM_PROMPT = [
   "你是一个 PromptDocument JSON 编辑器。",
   "用户会提供当前 PromptDocument 和自然语言修改指令。",
   "请根据指令修改对应字段，并返回修改后的完整 PromptDocument JSON。",
+  "如果 PromptDocument 包含 template_output，请优先在 template_output 中保持原有模板结构并合理修改所有相关字段。",
   "所有面向用户的文本必须使用简体中文，包括 prompt.*.description、raw_prompt_text、negative_prompt、metadata.model_suggestion。",
   "如果原文中存在英文描述，请在不改变含义的前提下改写为自然中文；只有 tags 中的行业通用英文短词可以保留。",
   "必须保留原 JSON 的整体结构和未被要求修改的字段。",
@@ -123,7 +147,7 @@ export async function analyzeImagePrompt(
   const messages: ChatMessage[] = [
     {
       role: "system",
-      content: ANALYZE_SYSTEM_PROMPT
+      content: createAnalyzeSystemPrompt(input.template, ANALYZE_SYSTEM_PROMPT)
     },
     {
       role: "user",
@@ -138,7 +162,7 @@ export async function analyzeImagePrompt(
             "source.images[0].id 使用 img_001。",
             "source.images[0].source_url 使用输入图片原始 URL 或 unknown。",
             "不要把 base64 图片内容写入 JSON。",
-            "请用简体中文输出完整提示词，不要输出英文 Prompt。"
+            "请用当前模板要求输出结果。"
           ].join("\n")
         },
         {
@@ -157,19 +181,95 @@ export async function analyzeImagePrompt(
   const result = await requestPromptDocument(config, messages, {
     signal: input.signal,
     onProgress: input.onProgress,
-    phase: "analyzing"
+    phase: "analyzing",
+    template: input.template,
+    normalizeOptions: {
+      sourceType: "single",
+      sourceImageUrl: input.sourceImageUrl ?? input.imageUrl,
+      sourcePageUrl: input.sourcePageUrl
+    }
   });
 
-  const document = normalizePromptDocument(result.document, {
-    sourceType: "single",
-    sourceImageUrl: input.sourceImageUrl ?? input.imageUrl,
-    sourcePageUrl: input.sourcePageUrl
+  return result;
+}
+
+export async function analyzeImageMixPrompt(
+  config: OpenAiGatewayConfig,
+  input: AnalyzeImageMixInput
+): Promise<PromptDocumentResult> {
+  validateConfig(config);
+
+  if (input.images.length < 2) {
+    throw createAppError(
+      "image_not_found",
+      "混搭模式至少需要 2 张参考图。"
+    );
+  }
+
+  const textParts = [
+    "请综合这些参考图，反推出一个融合主体、风格、光影、色彩、构图和质感的混搭 Prompt，并输出 PromptDocument JSON。",
+    "source.type 使用 mix。",
+    "source.images 按输入顺序保留每张图片，id 使用 img_001、img_002 这样的格式。",
+    "source.images[*].contributions 请写出该图主要贡献的字段，例如 subject、style、color。",
+    "不要把 base64 图片内容写入 JSON。",
+    "请用简体中文输出完整提示词，不要输出英文 Prompt。",
+    "",
+    "参考图来源：",
+    ...input.images.map((image, index) =>
+      [
+        `${index + 1}. ${image.sourceTitle ?? "unknown"}`,
+        `   图片：${image.sourceImageUrl || "unknown"}`,
+        `   页面：${image.sourcePageUrl ?? "unknown"}`
+      ].join("\n")
+    )
+  ];
+
+  const messages: ChatMessage[] = [
+    {
+      role: "system",
+      content: createAnalyzeSystemPrompt(input.template, ANALYZE_SYSTEM_PROMPT)
+    },
+    {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: textParts.join("\n")
+        },
+        ...input.images.map((image) => ({
+          type: "image_url" as const,
+          image_url: {
+            url: image.imageUrl,
+            detail: "high" as const
+          }
+        }))
+      ]
+    }
+  ];
+
+  input.onProgress?.({ phase: "analyzing", message: "Calling vision model" });
+  const sourceImages = createMixSourceImages(input);
+
+  const result = await requestPromptDocument(config, messages, {
+    signal: input.signal,
+    onProgress: input.onProgress,
+    phase: "analyzing",
+    template: input.template,
+    normalizeOptions: {
+      sourceType: "mix",
+      sourceImages
+    }
   });
 
-  return {
-    ...result,
-    document
-  };
+  return result;
+}
+
+function createMixSourceImages(input: AnalyzeImageMixInput): SourceImage[] {
+  return input.images.map((image, index) => ({
+    id: `img_${String(index + 1).padStart(3, "0")}`,
+    source_url: image.sourceImageUrl,
+    page_url: image.sourcePageUrl
+  }));
 }
 
 export async function editPromptDocument(
@@ -181,17 +281,11 @@ export async function editPromptDocument(
   const messages: ChatMessage[] = [
     {
       role: "system",
-      content: EDIT_SYSTEM_PROMPT
+      content: createEditSystemPrompt(input.template)
     },
     {
       role: "user",
-      content: [
-        "当前 PromptDocument：",
-        JSON.stringify(input.document, null, 2),
-        "",
-        "修改指令：",
-        input.instruction
-      ].join("\n")
+      content: createEditUserContent(input)
     }
   ];
 
@@ -200,7 +294,12 @@ export async function editPromptDocument(
   return requestPromptDocument(config, messages, {
     signal: input.signal,
     onProgress: input.onProgress,
-    phase: "editing"
+    phase: "editing",
+    template: input.template ?? readTemplateFromDocument(input.document),
+    normalizeOptions: {
+      sourceType: input.document.source.type,
+      sourceImages: input.document.source.images
+    }
   });
 }
 
@@ -211,6 +310,8 @@ async function requestPromptDocument(
     signal?: AbortSignal;
     onProgress?: (event: ApiProgressEvent) => void;
     phase: ApiTaskPhase;
+    template?: PromptTemplate;
+    normalizeOptions?: NormalizePromptDocumentOptions;
   }
 ): Promise<PromptDocumentResult> {
   const primaryBody = createRequestBody(config, messages, true);
@@ -247,6 +348,8 @@ async function executePromptDocumentRequest(
     onProgress?: (event: ApiProgressEvent) => void;
     phase: ApiTaskPhase;
     usedJsonMode: boolean;
+    template?: PromptTemplate;
+    normalizeOptions?: NormalizePromptDocumentOptions;
   }
 ): Promise<PromptDocumentResult> {
   const response = await fetchChatCompletion(config, body, options);
@@ -255,13 +358,148 @@ async function executePromptDocumentRequest(
   options.onProgress?.({ phase: "parsing", message: "Parsing model JSON" });
 
   const parsed = parseJsonObject(rawText);
-  const document = normalizePromptDocument(parsed);
+  const document = normalizeModelOutput(parsed, {
+    template: options.template,
+    normalizeOptions: options.normalizeOptions
+  });
 
   return {
     document,
     rawText,
     usedJsonMode: options.usedJsonMode
   };
+}
+
+function createAnalyzeSystemPrompt(
+  template: PromptTemplate | undefined,
+  fallback: string
+): string {
+  if (!template) {
+    return fallback;
+  }
+
+  return [
+    template.systemPrompt,
+    "",
+    "【扩展输出约定】",
+    "请严格遵守当前模板的 JSON 结构输出。",
+    "如果模板结构不是 PromptDocument，也不要强行改写成 PromptDocument。",
+    "不要把 base64 图片内容写入 JSON。",
+    "输出会被插件保存为 template_output，后续可继续被自然语言编辑。"
+  ].join("\n");
+}
+
+function createEditSystemPrompt(template: PromptTemplate | undefined): string {
+  if (!template) {
+    return EDIT_SYSTEM_PROMPT;
+  }
+
+  return [
+    EDIT_SYSTEM_PROMPT,
+    "",
+    "【当前模板】",
+    `模板名称：${template.name}`,
+    `模板描述：${template.description}`,
+    "模板 system prompt：",
+    template.systemPrompt,
+    "",
+    "编辑时必须保留当前模板输出结构。如果用户要求替换品牌、物品、材质、风格、场景或细节，请同步更新所有相关字段，避免只改一个局部字段。"
+  ].join("\n");
+}
+
+function createEditUserContent(input: EditPromptInput): ChatContent {
+  const textPart = [
+    "当前 PromptDocument：",
+    JSON.stringify(input.document, null, 2),
+    "",
+    input.visualReferences?.length
+      ? "本次编辑模式：视觉参考。请结合原图视觉信息与 JSON 内容进行修改。"
+      : "本次编辑模式：文本编辑。请只根据 JSON 内容和修改指令进行概念替换。",
+    "",
+    "修改指令：",
+    input.instruction
+  ].join("\n");
+
+  if (!input.visualReferences?.length) {
+    return textPart;
+  }
+
+  return [
+    {
+      type: "text",
+      text: textPart
+    },
+    ...input.visualReferences.map((reference) => ({
+      type: "image_url" as const,
+      image_url: {
+        url: reference.imageUrl,
+        detail: "high" as const
+      }
+    }))
+  ];
+}
+
+function normalizeModelOutput(
+  value: unknown,
+  options: {
+    template?: PromptTemplate;
+    normalizeOptions?: NormalizePromptDocumentOptions;
+  }
+): PromptDocument {
+  const templateMeta = options.template
+    ? {
+        id: options.template.id,
+        name: options.template.name,
+        icon: options.template.icon
+      }
+    : undefined;
+
+  if (looksLikePromptDocument(value)) {
+    return normalizePromptDocument(value, {
+      ...options.normalizeOptions,
+      template: templateMeta
+    });
+  }
+
+  return normalizePromptDocument(
+    {
+      template: templateMeta,
+      raw_prompt_text: createTemplateOutputText(value, options.template),
+      negative_prompt: "",
+      template_output: value,
+      metadata: {
+        model_suggestion: options.template?.name ?? "",
+        complexity_score: 0
+      }
+    },
+    {
+      ...options.normalizeOptions,
+      template: templateMeta,
+      templateOutput: value
+    }
+  );
+}
+
+function createTemplateOutputText(value: unknown, template?: PromptTemplate): string {
+  const prefix = template ? `${template.name}：` : "";
+
+  if (typeof value === "string") {
+    return `${prefix}${value}`;
+  }
+
+  try {
+    return `${prefix}${JSON.stringify(value, null, 2)}`;
+  } catch {
+    return `${prefix}模板输出已生成。`;
+  }
+}
+
+function looksLikePromptDocument(value: unknown): value is PromptDocument {
+  return isRecord(value) && isRecord(value.prompt) && isRecord(value.source);
+}
+
+function readTemplateFromDocument(_document: PromptDocument): PromptTemplate | undefined {
+  return undefined;
 }
 
 async function fetchChatCompletion(
@@ -599,4 +837,8 @@ function normalizeGatewayBasePath(hostname: string, pathname: string): string {
   }
 
   return pathname.replace(/\/v1$/i, "");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

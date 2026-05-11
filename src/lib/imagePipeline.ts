@@ -72,24 +72,20 @@ export async function prepareImageForVision(
 
   options.onProgress?.({
     phase: "checking_url",
-    message: "Checking whether the original image URL can be sent directly."
+    message: "Checking whether the image needs local conversion."
   });
 
-  if (canUseRemoteImageUrl(imageUrl)) {
-    return {
-      imageUrl,
-      sourceImageUrl: imageUrl,
-      transport: "remote_url",
-      wasCompressed: false
-    };
-  }
-
-  return fetchAndCompressImage(imageUrl, options);
+  // Many shopping/social/media sites return signed or cookie-bound image URLs.
+  // Server-side vision gateways cannot fetch those URLs because they do not have
+  // the user's browser session or page referer. Prefer a local data URL payload
+  // so right-click reverse engineering works on protected web images.
+  return fetchAndCompressImage(imageUrl, options, createSourceImageReference(source));
 }
 
 export async function fetchAndCompressImage(
   imageUrl: string,
-  options: PrepareImageOptions = {}
+  options: PrepareImageOptions = {},
+  sourceImageUrl = createSafeSourceImageUrl(imageUrl)
 ): Promise<PreparedImagePayload> {
   options.onProgress?.({
     phase: "fetching_image",
@@ -101,7 +97,7 @@ export async function fetchAndCompressImage(
 
   return {
     imageUrl: encoded.dataUrl,
-    sourceImageUrl: imageUrl,
+    sourceImageUrl,
     transport: "data_url",
     width: encoded.width,
     height: encoded.height,
@@ -109,6 +105,28 @@ export async function fetchAndCompressImage(
     mimeType: encoded.mimeType,
     wasCompressed: true
   };
+}
+
+function createSourceImageReference(source: ImageSourceInput): string {
+  if (!source.url.startsWith("data:image/")) {
+    return createSafeSourceImageUrl(source.url);
+  }
+
+  const title = source.sourceTitle?.trim();
+
+  if (title && title !== "剪贴板截图") {
+    return `upload://${encodeURIComponent(title).slice(0, 180)}`;
+  }
+
+  return "clipboard://image";
+}
+
+function createSafeSourceImageUrl(url: string): string {
+  if (url.startsWith("data:image/")) {
+    return "clipboard://image";
+  }
+
+  return url;
 }
 
 export async function compressImageBlob(

@@ -37,10 +37,16 @@ export interface PromptField {
 export interface PromptDocument {
   version: string;
   generated_at: string;
+  template?: {
+    id: string;
+    name: string;
+    icon?: string;
+  };
   source: PromptDocumentSource;
   prompt: Record<PromptFieldKey, PromptField>;
   raw_prompt_text: string;
   negative_prompt: string;
+  template_output?: unknown;
   metadata: {
     model_suggestion?: string;
     complexity_score?: number;
@@ -52,6 +58,9 @@ export interface NormalizePromptDocumentOptions {
   sourceType?: PromptSourceType;
   sourceImageUrl?: string;
   sourcePageUrl?: string;
+  sourceImages?: SourceImage[];
+  template?: PromptDocument["template"];
+  templateOutput?: unknown;
 }
 
 export interface PromptSummary {
@@ -122,6 +131,7 @@ export function createEmptyPromptDocument(
   return {
     version: "1.0",
     generated_at: new Date().toISOString(),
+    template: undefined,
     source: {
       type: sourceType,
       images: []
@@ -129,6 +139,7 @@ export function createEmptyPromptDocument(
     prompt,
     raw_prompt_text: "",
     negative_prompt: "",
+    template_output: undefined,
     metadata: {
       model_suggestion: "",
       complexity_score: 0
@@ -151,14 +162,20 @@ export function normalizePromptDocument(
 
   const sourceInput = isRecord(input.source) ? input.source : {};
   const imagesInput = Array.isArray(sourceInput.images) ? sourceInput.images : [];
-  const images = imagesInput
+  let images = imagesInput
     .filter(isRecord)
     .map((image, index) => normalizeSourceImage(image, index));
+
+  if (options.sourceImages?.length) {
+    images = options.sourceImages.map((image, index) =>
+      normalizeSourceImage(image as unknown as Record<string, unknown>, index)
+    );
+  }
 
   if (options.sourceImageUrl && images.length === 0) {
     images.push({
       id: "img_001",
-      source_url: options.sourceImageUrl,
+      source_url: sanitizeStoredImageReference(options.sourceImageUrl),
       page_url: options.sourcePageUrl,
       contributions: FIELD_KEYS
     });
@@ -167,6 +184,7 @@ export function normalizePromptDocument(
   const document: PromptDocument = {
     version: readString(input.version, fallback.version),
     generated_at: readString(input.generated_at, new Date().toISOString()),
+    template: normalizeTemplate(input.template, options.template),
     source: {
       type: readSourceType(sourceInput.type, options.sourceType ?? fallback.source.type),
       images
@@ -174,6 +192,8 @@ export function normalizePromptDocument(
     prompt,
     raw_prompt_text: readString(input.raw_prompt_text, ""),
     negative_prompt: readString(input.negative_prompt, ""),
+    template_output:
+      options.templateOutput !== undefined ? options.templateOutput : input.template_output,
     metadata: normalizeMetadata(input.metadata)
   };
 
@@ -202,6 +222,13 @@ export function buildRawPromptText(document: PromptDocument): string {
 }
 
 export function createPromptSummary(document: PromptDocument): PromptSummary {
+  if (document.template?.name && document.template_output !== undefined) {
+    return {
+      title: document.template.name,
+      subtitle: document.raw_prompt_text.slice(0, 80)
+    };
+  }
+
   const subject = document.prompt.subject.description || "未命名 Prompt";
   const style = document.prompt.style.description;
   const color = document.prompt.color.description;
@@ -308,12 +335,26 @@ function normalizeSourceImage(value: Record<string, unknown>, index: number): So
 
   return {
     id: readString(value.id, `img_${String(index + 1).padStart(3, "0")}`),
-    url: readOptionalString(value.url),
-    source_url: readOptionalString(value.source_url),
+    url: sanitizeStoredImageReference(readOptionalString(value.url)),
+    source_url: sanitizeStoredImageReference(readOptionalString(value.source_url)),
     page_url: readOptionalString(value.page_url),
-    thumbnail: readOptionalString(value.thumbnail),
+    thumbnail: sanitizeStoredImageReference(readOptionalString(value.thumbnail)),
     contributions
   };
+}
+
+function sanitizeStoredImageReference(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+
+  if (!trimmed || /^data:image\//i.test(trimmed)) {
+    return undefined;
+  }
+
+  return trimmed.length > 2048 ? trimmed.slice(0, 2048) : trimmed;
 }
 
 function normalizeMetadata(value: unknown): PromptDocument["metadata"] {
@@ -328,6 +369,25 @@ function normalizeMetadata(value: unknown): PromptDocument["metadata"] {
       typeof value.complexity_score === "number"
         ? value.complexity_score
         : undefined
+  };
+}
+
+function normalizeTemplate(
+  value: unknown,
+  fallback?: PromptDocument["template"]
+): PromptDocument["template"] | undefined {
+  const input = isRecord(value) ? value : {};
+  const id = readOptionalString(input.id) ?? fallback?.id;
+  const name = readOptionalString(input.name) ?? fallback?.name;
+
+  if (!id || !name) {
+    return fallback;
+  }
+
+  return {
+    id,
+    name,
+    icon: readOptionalString(input.icon) ?? fallback?.icon
   };
 }
 

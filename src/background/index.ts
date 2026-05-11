@@ -5,6 +5,7 @@ import {
   type PreparedImagePayload
 } from "../lib/imagePipeline";
 import {
+  analyzeImageMixPrompt,
   analyzeImagePrompt,
   editPromptDocument,
   type ApiProgressEvent
@@ -13,6 +14,7 @@ import type { PromptDocument } from "../lib/promptDocument";
 import {
   addHistoryItem,
   getPrivacyConsent,
+  getSelectedPromptTemplate,
   getSettings,
   savePrivacyConsent,
   type PromptHistoryItem
@@ -22,6 +24,8 @@ const MENU_ANALYZE_IMAGE = "prompt-reverse:analyze-image";
 const MENU_ADD_TO_MIX = "prompt-reverse:add-to-mix";
 const CONSENT_TIMEOUT_MS = 5 * 60 * 1000;
 const HEARTBEAT_INTERVAL_MS = 15_000;
+const MAX_MIX_IMAGES = 6;
+const MIX_IMAGES_KEY = "mixImages";
 
 type TaskStatus =
   | "idle"
@@ -50,11 +54,18 @@ interface TaskState {
   createdAt: string;
   updatedAt: string;
   source?: CapturedImage;
+  sources?: CapturedImage[];
   preparedImage?: PreparedImagePayload;
+  preparedImages?: PreparedImagePayload[];
   document?: PromptDocument;
   rawText?: string;
   usedJsonMode?: boolean;
   error?: ReturnType<typeof toUserFacingError>;
+}
+
+interface EditVisualReference {
+  imageUrl: string;
+  sourceImageUrl?: string;
 }
 
 interface RuntimeResponse<T = unknown> {
@@ -65,8 +76,17 @@ interface RuntimeResponse<T = unknown> {
 
 type RuntimeRequest =
   | { type: "panel:get-state" }
+  | { type: "panel:get-mix" }
   | { type: "panel:analyze-image"; image: CapturedImage }
-  | { type: "panel:edit-prompt"; document: PromptDocument; instruction: string }
+  | { type: "panel:analyze-mix"; images?: CapturedImage[] }
+  | { type: "panel:clear-mix" }
+  | { type: "panel:remove-mix-image"; url: string }
+  | {
+      type: "panel:edit-prompt";
+      document: PromptDocument;
+      instruction: string;
+      visualReferences?: EditVisualReference[];
+    }
   | { type: "panel:cancel-task"; taskId?: string }
   | {
       type: "panel:privacy-consent-response";
@@ -94,6 +114,7 @@ interface ConsentDecision {
 let currentTask: TaskState | null = null;
 let activeController: AbortController | null = null;
 let heartbeatTimer: ReturnType<typeof globalThis.setInterval> | undefined;
+let mixImages: CapturedImage[] = [];
 
 const pendingConsent = new Map<
   string,
@@ -125,13 +146,8 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   }
 
   if (info.menuItemId === MENU_ADD_TO_MIX) {
-    void openPanel(tab).then(() => {
-      void broadcast({
-        type: "background:placeholder",
-        feature: "mix",
-        message: "混搭模式将在 P1 版本中开放。"
-      });
-    });
+    const image = createCapturedImage(info, tab);
+    void addMixImage(image).then(() => openPanel(tab));
   }
 });
 
@@ -179,7 +195,7 @@ function setupContextMenus(): void {
 
     chrome.contextMenus.create({
       id: MENU_ADD_TO_MIX,
-      title: "添加到混搭（即将推出）",
+      title: "添加到混搭",
       contexts: ["image"]
     });
   });
@@ -198,11 +214,34 @@ async function handleRuntimeMessage(message: RuntimeRequest): Promise<unknown> {
     case "panel:get-state":
       return currentTask;
 
+    case "panel:get-mix":
+      return loadMixImages();
+
     case "panel:analyze-image":
       return startAnalyzeTask(message.image);
 
+    case "panel:analyze-mix":
+      return startAnalyzeMixTask(message.images ?? mixImages);
+
+    case "panel:clear-mix":
+      mixImages = [];
+      await saveMixImages(mixImages);
+      void broadcastMixUpdated();
+      return mixImages;
+
+    case "panel:remove-mix-image":
+      await loadMixImages();
+      mixImages = mixImages.filter((image) => image.url !== message.url);
+      await saveMixImages(mixImages);
+      void broadcastMixUpdated();
+      return mixImages;
+
     case "panel:edit-prompt":
-      return startEditTask(message.document, message.instruction);
+      return startEditTask(
+        message.document,
+        message.instruction,
+        message.visualReferences
+      );
 
     case "panel:cancel-task":
       cancelCurrentTask(message.taskId);
@@ -250,6 +289,37 @@ async function startAnalyzeTask(image: CapturedImage): Promise<TaskState> {
   return currentTask!;
 }
 
+async function startAnalyzeMixTask(images: CapturedImage[]): Promise<TaskState> {
+  if (images.length < 2) {
+    throw createAppError("image_not_found", "混搭模式至少需要 2 张参考图。");
+  }
+
+  cancelCurrentTask();
+
+  const taskId = createTaskId("analyze");
+  const controller = new AbortController();
+  activeController = controller;
+
+  setCurrentTask({
+    id: taskId,
+    kind: "analyze",
+    status: "preparing",
+    message: `正在准备 ${images.length} 张参考图`,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    source: images[0],
+    sources: images
+  });
+
+  startHeartbeat(taskId);
+
+  void runAnalyzeMixTask(taskId, images, controller).finally(() => {
+    stopHeartbeat(taskId);
+  });
+
+  return currentTask!;
+}
+
 async function runAnalyzeTask(
   taskId: string,
   image: CapturedImage,
@@ -257,6 +327,7 @@ async function runAnalyzeTask(
 ): Promise<void> {
   try {
     const settings = await getSettings();
+    const template = await getSelectedPromptTemplate();
 
     if (!settings.apiBaseUrl || !settings.apiKey || !settings.model) {
       throw createAppError("missing_config", "API configuration is incomplete.");
@@ -306,6 +377,7 @@ async function runAnalyzeTask(
         sourceImageUrl: preparedImage.sourceImageUrl,
         sourcePageUrl: image.sourcePageUrl,
         sourceTitle: image.sourceTitle,
+        template,
         signal: controller.signal,
         onProgress: (event) => handleApiProgress(taskId, event)
       }
@@ -328,9 +400,109 @@ async function runAnalyzeTask(
   }
 }
 
+async function runAnalyzeMixTask(
+  taskId: string,
+  images: CapturedImage[],
+  controller: AbortController
+): Promise<void> {
+  try {
+    const settings = await getSettings();
+    const template = await getSelectedPromptTemplate();
+
+    if (!settings.apiBaseUrl || !settings.apiKey || !settings.model) {
+      throw createAppError("missing_config", "API configuration is incomplete.");
+    }
+
+    const consent = await ensurePrivacyConsent(taskId);
+
+    if (!consent.granted) {
+      throw createAppError("privacy_denied", "User denied image upload.");
+    }
+
+    controller.signal.throwIfAborted();
+
+    const preparedImages: PreparedImagePayload[] = [];
+
+    for (let index = 0; index < images.length; index += 1) {
+      const image = images[index];
+
+      if (!image) {
+        continue;
+      }
+
+      updateCurrentTask(taskId, {
+        status: "preparing",
+        phase: "prepare_image",
+        message: `正在处理第 ${index + 1}/${images.length} 张参考图`
+      });
+
+      preparedImages.push(
+        await prepareImageForVision(
+          {
+            url: image.url,
+            sourcePageUrl: image.sourcePageUrl,
+            sourceTitle: image.sourceTitle
+          },
+          {
+            signal: controller.signal,
+            onProgress: (event) =>
+              handleImageProgress(taskId, {
+                ...event,
+                message: `第 ${index + 1}/${images.length} 张：${event.message ?? ""}`
+              })
+          }
+        )
+      );
+    }
+
+    updateCurrentTask(taskId, {
+      preparedImages,
+      preparedImage: preparedImages[0],
+      status: "running",
+      phase: "analyzing",
+      message: "正在调用视觉模型进行混搭反推"
+    });
+
+    const result = await analyzeImageMixPrompt(
+      {
+        apiBaseUrl: settings.apiBaseUrl,
+        apiKey: settings.apiKey,
+        model: settings.model
+      },
+      {
+        images: preparedImages.map((preparedImage, index) => ({
+          imageUrl: preparedImage.imageUrl,
+          sourceImageUrl: preparedImage.sourceImageUrl,
+          sourcePageUrl: images[index]?.sourcePageUrl,
+          sourceTitle: images[index]?.sourceTitle
+        })),
+        template,
+        signal: controller.signal,
+        onProgress: (event) => handleApiProgress(taskId, event)
+      }
+    );
+
+    updateCurrentTask(taskId, {
+      status: "done",
+      phase: "done",
+      message: "混搭分析完成",
+      document: result.document,
+      rawText: result.rawText,
+      usedJsonMode: result.usedJsonMode
+    });
+  } catch (error) {
+    handleTaskError(taskId, error);
+  } finally {
+    if (currentTask?.id === taskId) {
+      activeController = null;
+    }
+  }
+}
+
 async function startEditTask(
   document: PromptDocument,
-  instruction: string
+  instruction: string,
+  visualReferences: EditVisualReference[] = []
 ): Promise<TaskState> {
   cancelCurrentTask();
 
@@ -351,7 +523,13 @@ async function startEditTask(
 
   startHeartbeat(taskId);
 
-  void runEditTask(taskId, document, instruction, controller).finally(() => {
+  void runEditTask(
+    taskId,
+    document,
+    instruction,
+    visualReferences,
+    controller
+  ).finally(() => {
     stopHeartbeat(taskId);
   });
 
@@ -362,10 +540,12 @@ async function runEditTask(
   taskId: string,
   document: PromptDocument,
   instruction: string,
+  visualReferences: EditVisualReference[],
   controller: AbortController
 ): Promise<void> {
   try {
     const settings = await getSettings();
+    const template = await getSelectedPromptTemplate();
 
     if (!settings.apiBaseUrl || !settings.apiKey || !settings.model) {
       throw createAppError("missing_config", "API configuration is incomplete.");
@@ -380,6 +560,8 @@ async function runEditTask(
       {
         document,
         instruction,
+        template,
+        visualReferences,
         signal: controller.signal,
         onProgress: (event) => handleApiProgress(taskId, event)
       }
@@ -670,12 +852,55 @@ function createCapturedImage(
   };
 }
 
+async function addMixImage(image: CapturedImage): Promise<void> {
+  if (!image.url.trim()) {
+    return;
+  }
+
+  await loadMixImages();
+  const withoutDuplicate = mixImages.filter((item) => item.url !== image.url);
+  mixImages = [image, ...withoutDuplicate].slice(0, MAX_MIX_IMAGES);
+  await saveMixImages(mixImages);
+  void broadcastMixUpdated();
+}
+
+async function loadMixImages(): Promise<CapturedImage[]> {
+  const stored = await chrome.storage.local.get(MIX_IMAGES_KEY);
+  const images = stored[MIX_IMAGES_KEY];
+
+  mixImages = Array.isArray(images)
+    ? images.filter(isCapturedImage).slice(0, MAX_MIX_IMAGES)
+    : [];
+
+  return mixImages;
+}
+
+async function saveMixImages(images: CapturedImage[]): Promise<void> {
+  await chrome.storage.local.set({ [MIX_IMAGES_KEY]: images });
+}
+
+function isCapturedImage(value: unknown): value is CapturedImage {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "url" in value &&
+    typeof (value as { url?: unknown }).url === "string"
+  );
+}
+
 async function broadcast(message: unknown): Promise<void> {
   try {
     await chrome.runtime.sendMessage(message);
   } catch {
     // It is normal for no side panel to be listening yet.
   }
+}
+
+async function broadcastMixUpdated(): Promise<void> {
+  await broadcast({
+    type: "background:mix-updated",
+    images: mixImages
+  });
 }
 
 async function broadcastError(error: unknown): Promise<void> {

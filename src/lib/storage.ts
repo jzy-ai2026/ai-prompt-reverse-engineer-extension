@@ -4,10 +4,20 @@ import {
   normalizePromptDocument,
   type PromptDocument
 } from "./promptDocument";
+import {
+  BUILT_IN_PROMPT_TEMPLATES,
+  DEFAULT_PROMPT_TEMPLATE_ID,
+  getDefaultPromptTemplate,
+  isBuiltInPromptTemplateId,
+  normalizePromptTemplate,
+  type CustomPromptTemplateInput,
+  type PromptTemplate
+} from "./promptTemplates";
 
 const SETTINGS_KEY = "settings";
 const PRIVACY_CONSENT_KEY = "privacyConsent";
 const HISTORY_KEY = "promptHistory";
+const CUSTOM_PROMPT_TEMPLATES_KEY = "customPromptTemplates";
 const MAX_HISTORY_ITEMS = 20;
 
 export const DEFAULT_API_BASE_URL =
@@ -27,6 +37,7 @@ export interface ExtensionSettings {
   apiKey: string;
   model: string;
   modelPresets: string[];
+  selectedPromptTemplateId: string;
 }
 
 export interface PrivacyConsent {
@@ -60,7 +71,8 @@ export function getDefaultSettings(): ExtensionSettings {
     apiBaseUrl: DEFAULT_API_BASE_URL,
     apiKey: DEV_DEFAULT_API_KEY,
     model: DEFAULT_MODEL,
-    modelPresets: DEFAULT_MODEL_PRESETS
+    modelPresets: DEFAULT_MODEL_PRESETS,
+    selectedPromptTemplateId: DEFAULT_PROMPT_TEMPLATE_ID
   };
 }
 
@@ -79,7 +91,11 @@ export async function getSettings(): Promise<ExtensionSettings> {
     model: readString(settings.model, defaults.model),
     modelPresets: Array.isArray(settings.modelPresets)
       ? settings.modelPresets.filter((item): item is string => typeof item === "string")
-      : defaults.modelPresets
+      : defaults.modelPresets,
+    selectedPromptTemplateId: readString(
+      settings.selectedPromptTemplateId,
+      defaults.selectedPromptTemplateId
+    )
   };
 }
 
@@ -96,7 +112,9 @@ export async function saveSettings(
     modelPresets: normalizeModelPresets(
       updates.modelPresets ?? current.modelPresets,
       updates.model ?? current.model
-    )
+    ),
+    selectedPromptTemplateId:
+      updates.selectedPromptTemplateId ?? current.selectedPromptTemplateId
   };
 
   await storageSet({ [SETTINGS_KEY]: next });
@@ -135,8 +153,19 @@ export async function clearPrivacyConsent(): Promise<void> {
 export async function getHistory(): Promise<PromptHistoryItem[]> {
   const stored = await storageGet<{ [HISTORY_KEY]?: unknown[] }>(HISTORY_KEY);
   const history = stored[HISTORY_KEY] ?? [];
+  const normalizedHistory = history
+    .filter(isPromptHistoryItem)
+    .slice(0, MAX_HISTORY_ITEMS)
+    .map(normalizeHistoryItem);
 
-  return history.filter(isPromptHistoryItem).slice(0, MAX_HISTORY_ITEMS);
+  if (
+    history.length !== normalizedHistory.length ||
+    containsInlineImageDataUrl(history)
+  ) {
+    await storageSet({ [HISTORY_KEY]: normalizedHistory });
+  }
+
+  return normalizedHistory;
 }
 
 export async function addHistoryItem(input: {
@@ -175,6 +204,92 @@ export async function removeHistoryItem(id: string): Promise<PromptHistoryItem[]
 
 export async function clearHistory(): Promise<void> {
   await storageSet({ [HISTORY_KEY]: [] });
+}
+
+export async function getPromptTemplates(): Promise<PromptTemplate[]> {
+  const stored = await storageGet<{
+    [CUSTOM_PROMPT_TEMPLATES_KEY]?: unknown[];
+  }>(CUSTOM_PROMPT_TEMPLATES_KEY);
+  const customTemplates = (stored[CUSTOM_PROMPT_TEMPLATES_KEY] ?? [])
+    .map((item) => normalizePromptTemplate(item))
+    .filter((template): template is PromptTemplate => Boolean(template))
+    .filter((template) => !isBuiltInPromptTemplateId(template.id))
+    .map((template) => ({ ...template, kind: "custom" as const }));
+
+  return [...BUILT_IN_PROMPT_TEMPLATES, ...customTemplates];
+}
+
+export async function getSelectedPromptTemplate(): Promise<PromptTemplate> {
+  const settings = await getSettings();
+  const templates = await getPromptTemplates();
+
+  return (
+    templates.find((template) => template.id === settings.selectedPromptTemplateId) ??
+    getDefaultPromptTemplate()
+  );
+}
+
+export async function saveCustomPromptTemplate(
+  input: CustomPromptTemplateInput
+): Promise<PromptTemplate[]> {
+  const current = await getPromptTemplates();
+  const custom = current.filter((template) => template.kind === "custom");
+  const normalized = normalizePromptTemplate({
+    ...input,
+    id:
+      input.id && !isBuiltInPromptTemplateId(input.id)
+        ? input.id
+        : createCustomTemplateId(),
+    kind: "custom"
+  });
+
+  if (!normalized) {
+    return current;
+  }
+
+  const nextCustom = [
+    normalized,
+    ...custom.filter((template) => template.id !== normalized.id)
+  ];
+
+  await storageSet({ [CUSTOM_PROMPT_TEMPLATES_KEY]: nextCustom });
+  return [...BUILT_IN_PROMPT_TEMPLATES, ...nextCustom];
+}
+
+export async function duplicatePromptTemplate(id: string): Promise<PromptTemplate[]> {
+  const templates = await getPromptTemplates();
+  const source = templates.find((template) => template.id === id);
+
+  if (!source) {
+    return templates;
+  }
+
+  return saveCustomPromptTemplate({
+    ...source,
+    id: createCustomTemplateId(),
+    name: `${source.name} 副本`,
+    kind: "custom"
+  });
+}
+
+export async function deleteCustomPromptTemplate(id: string): Promise<PromptTemplate[]> {
+  if (isBuiltInPromptTemplateId(id)) {
+    return getPromptTemplates();
+  }
+
+  const templates = await getPromptTemplates();
+  const nextCustom = templates.filter(
+    (template) => template.kind === "custom" && template.id !== id
+  );
+
+  await storageSet({ [CUSTOM_PROMPT_TEMPLATES_KEY]: nextCustom });
+
+  const settings = await getSettings();
+  if (settings.selectedPromptTemplateId === id) {
+    await saveSettings({ selectedPromptTemplateId: DEFAULT_PROMPT_TEMPLATE_ID });
+  }
+
+  return [...BUILT_IN_PROMPT_TEMPLATES, ...nextCustom];
 }
 
 function normalizeApiBaseUrl(value: string): string {
@@ -221,6 +336,14 @@ function createHistoryId(): string {
   return `hist_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 }
 
+function createCustomTemplateId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return `custom_${crypto.randomUUID()}`;
+  }
+
+  return `custom_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+}
+
 function isPromptHistoryItem(value: unknown): value is PromptHistoryItem {
   if (!isRecord(value)) {
     return false;
@@ -235,18 +358,69 @@ function isPromptHistoryItem(value: unknown): value is PromptHistoryItem {
   );
 }
 
+function normalizeHistoryItem(item: PromptHistoryItem): PromptHistoryItem {
+  const document = normalizePromptDocument(item.document);
+  const summary = createPromptSummary(document);
+
+  return {
+    ...item,
+    summaryTitle: item.summaryTitle || summary.title,
+    summarySubtitle: item.summarySubtitle || summary.subtitle,
+    rawPromptText: document.raw_prompt_text || buildRawPromptText(document),
+    document
+  };
+}
+
+function containsInlineImageDataUrl(value: unknown, depth = 0): boolean {
+  if (depth > 8) {
+    return false;
+  }
+
+  if (typeof value === "string") {
+    return /^data:image\//i.test(value.trim());
+  }
+
+  if (Array.isArray(value)) {
+    return value.some((item) => containsInlineImageDataUrl(item, depth + 1));
+  }
+
+  if (isRecord(value)) {
+    return Object.values(value).some((item) =>
+      containsInlineImageDataUrl(item, depth + 1)
+    );
+  }
+
+  return false;
+}
+
 function storageGet<T extends Record<string, unknown>>(
   keys: string | string[]
 ): Promise<T> {
+  if (!hasExtensionStorage()) {
+    return Promise.resolve({} as T);
+  }
+
   return chrome.storage.local.get(keys) as Promise<T>;
 }
 
 function storageSet(values: Record<string, unknown>): Promise<void> {
+  if (!hasExtensionStorage()) {
+    return Promise.resolve();
+  }
+
   return chrome.storage.local.set(values);
 }
 
 function storageRemove(keys: string | string[]): Promise<void> {
+  if (!hasExtensionStorage()) {
+    return Promise.resolve();
+  }
+
   return chrome.storage.local.remove(keys);
+}
+
+function hasExtensionStorage(): boolean {
+  return typeof chrome !== "undefined" && Boolean(chrome.storage?.local);
 }
 
 function readString(value: unknown, fallback: string): string {
