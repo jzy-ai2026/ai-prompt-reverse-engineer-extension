@@ -1,0 +1,66 @@
+{
+  "manifest_version": 3,
+  "name": "AI Prompt Reverse Engineer",
+  "version": "0.1.0",
+  "description": "Reverse engineer image prompts from web images with an OpenAI-compatible AI gateway.",
+  "minimum_chrome_version": "120",
+  "action": {
+    "default_title": "AI Prompt Reverse Engineer"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "permissions": [
+    "activeTab",
+    "clipboardWrite",
+    "contextMenus",
+    "sidePanel",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "commands": {
+    "open-panel": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+P",
+        "mac": "Command+Shift+P"
+      },
+      "description": "Open the prompt reverse engineer panel"
+    },
+    "analyze-selected-image": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+R",
+        "mac": "Command+Shift+R"
+      },
+      "description": "Reverse engineer the selected image"
+    },
+    "save-current-prompt": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+S",
+        "mac": "Command+Shift+S"
+      },
+      "description": "Save the current prompt document"
+    },
+    "copy-current-json": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+C",
+        "mac": "Command+Shift+C"
+      },
+      "description": "Copy the current prompt JSON"
+    }
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}
