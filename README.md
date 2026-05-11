@@ -4,6 +4,8 @@ Chrome/Edge 浏览器插件 MVP，用于从网页图片反推结构化 AI 生成
 
 ## 安装给同事使用
 
+完整安装说明见 [INSTALL.md](./INSTALL.md)。
+
 1. 解压 `release/ai-prompt-reverse-engineer-extension-v0.1.0.zip`。
 2. 打开 Chrome 或 Edge，进入 `chrome://extensions`。
 3. 打开右上角“开发者模式”。
