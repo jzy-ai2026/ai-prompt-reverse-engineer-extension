@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertCircle, BookOpen, History, Loader2, Settings, Sparkles } from "lucide-react";
+import {
+  AlertCircle,
+  BookOpen,
+  History,
+  ImageIcon,
+  Loader2,
+  Settings,
+  Sparkles
+} from "lucide-react";
 import { toUserFacingError, type UserFacingError } from "../lib/errors";
 import {
   applyFieldAssignment,
@@ -22,7 +30,10 @@ import {
 import type { PromptTemplate } from "../lib/promptTemplates";
 import { HistoryList } from "./components/HistoryList";
 import { ImagePreview } from "./components/ImagePreview";
-import { InstructionInput } from "./components/InstructionInput";
+import {
+  InstructionInput,
+  type InstructionImageReference
+} from "./components/InstructionInput";
 import { JsonEditor } from "./components/JsonEditor";
 import { PromptPreview } from "./components/PromptPreview";
 import { SettingsPanel } from "./components/SettingsPanel";
@@ -87,6 +98,13 @@ interface RuntimeResponse<T> {
 interface EditVisualReference {
   imageUrl: string;
   sourceImageUrl?: string;
+  label?: string;
+  sourceTitle?: string;
+}
+
+interface EditImageReference extends InstructionImageReference {
+  imageUrl: string;
+  sourceImageUrl?: string;
 }
 
 type BackgroundMessage =
@@ -139,6 +157,22 @@ export function App() {
     return task.message || task.phase || task.status;
   }, [task]);
 
+  const statusLabel = useMemo(() => {
+    if (isBusy) {
+      return "处理中";
+    }
+
+    if (task?.status === "done") {
+      return "已生成";
+    }
+
+    if (task?.status === "error") {
+      return "需处理";
+    }
+
+    return "待开始";
+  }, [isBusy, task?.status]);
+
   const selectedTemplate = useMemo(
     () =>
       templates.find(
@@ -147,9 +181,11 @@ export function App() {
     [settings?.selectedPromptTemplateId, templates]
   );
 
-  const hasVisualEditContext = Boolean(
-    task?.preparedImages?.length || task?.preparedImage
+  const editImageReferences = useMemo(
+    () => createEditImageReferences(task, mixImages),
+    [mixImages, task]
   );
+  const hasVisualEditContext = editImageReferences.length > 0;
 
   const setActiveDocument = useCallback(
     (nextDocument: PromptDocument, options: { pushUndo?: boolean } = {}) => {
@@ -340,7 +376,11 @@ export function App() {
   );
 
   const handleInstructionSubmit = useCallback(
-    async (instruction: string, resolvedMode: ResolvedEditMode) => {
+    async (
+      instruction: string,
+      resolvedMode: ResolvedEditMode,
+      referencedImageIndexes: number[]
+    ) => {
       const localEdit = applyFieldAssignment(document, instruction);
 
       if (localEdit && resolvedMode === "text") {
@@ -355,13 +395,15 @@ export function App() {
           document,
           instruction,
           visualReferences:
-            resolvedMode === "vision" ? collectVisualReferences(task) : undefined
+            resolvedMode === "vision"
+              ? collectVisualReferences(editImageReferences, referencedImageIndexes)
+              : undefined
         });
       } catch (caught) {
         setError(toUserFacingError(caught));
       }
     },
-    [document, setActiveDocument, task]
+    [document, editImageReferences, setActiveDocument]
   );
 
   const handleConsent = useCallback(
@@ -401,6 +443,11 @@ export function App() {
   }, [mixImages]);
 
   const removeMixImage = useCallback(async (url: string) => {
+    if (!hasExtensionRuntime()) {
+      setMixImages((current) => current.filter((image) => image.url !== url));
+      return;
+    }
+
     setMixImages(
       await sendRuntimeMessage<CapturedImage[]>({
         type: "panel:remove-mix-image",
@@ -410,7 +457,36 @@ export function App() {
   }, []);
 
   const clearMixImages = useCallback(async () => {
+    if (!hasExtensionRuntime()) {
+      setMixImages([]);
+      return;
+    }
+
     setMixImages(await sendRuntimeMessage<CapturedImage[]>({ type: "panel:clear-mix" }));
+  }, []);
+
+  const addMixImages = useCallback(async (images: CapturedImage[]) => {
+    try {
+      setError(null);
+
+      if (!hasExtensionRuntime()) {
+        setMixImages((current) => {
+          const nextUrls = new Set(images.map((image) => image.url));
+          const withoutDuplicates = current.filter((image) => !nextUrls.has(image.url));
+          return [...images, ...withoutDuplicates].slice(0, 6);
+        });
+        return;
+      }
+
+      setMixImages(
+        await sendRuntimeMessage<CapturedImage[]>({
+          type: "panel:add-mix-images",
+          images
+        })
+      );
+    } catch (caught) {
+      setError(toUserFacingError(caught));
+    }
   }, []);
 
   const changeTemplate = useCallback(async (templateId: string) => {
@@ -495,6 +571,20 @@ export function App() {
 
       {viewMode === "workspace" && (
         <main className="workspace">
+          <section className="workspace-hero" aria-label="当前工作流状态">
+            <div>
+              <span className="hero-kicker">IMAGE TO PROMPT</span>
+              <h2>把参考图整理成可控 Prompt</h2>
+            </div>
+            <div className="hero-metrics" aria-label="工作流概览">
+              <span>
+                <ImageIcon size={14} />
+                {mixImages.length ? `${mixImages.length} 张参考` : "单图分析"}
+              </span>
+              <span>{statusLabel}</span>
+            </div>
+          </section>
+
           <div className="workspace-grid">
             <div className="workspace-column workspace-input-column">
               <section className="status-strip" data-status={task?.status ?? "idle"}>
@@ -510,7 +600,7 @@ export function App() {
 
               <section className="template-strip">
                 <div>
-                  <strong>模板切换</strong>
+                  <strong>{selectedTemplate?.name ?? "默认模板"}</strong>
                   <span>{selectedTemplate?.description ?? "选择本次反推使用的提示词模板"}</span>
                 </div>
                 <select
@@ -564,6 +654,7 @@ export function App() {
                   sendRuntimeMessage({ type: "panel:analyze-image", image })
                 }
                 onAnalyzeMix={analyzeMix}
+                onAddMixImages={addMixImages}
                 onRemoveMixImage={removeMixImage}
                 onClearMixImages={clearMixImages}
               />
@@ -614,6 +705,7 @@ export function App() {
             disabled={isBusy}
             mode={editMode}
             hasVisualContext={hasVisualEditContext}
+            imageReferences={editImageReferences}
             onModeChange={setEditMode}
             onSubmit={handleInstructionSubmit}
           />
@@ -646,23 +738,75 @@ export function App() {
   );
 }
 
-function collectVisualReferences(task: TaskState | null): EditVisualReference[] {
-  if (!task) {
-    return [];
+function collectVisualReferences(
+  references: EditImageReference[],
+  referencedImageIndexes: number[]
+): EditVisualReference[] {
+  const selectedIndexes = new Set(referencedImageIndexes);
+  const selectedReferences = selectedIndexes.size
+    ? references.filter((reference) => selectedIndexes.has(reference.index))
+    : references;
+
+  return selectedReferences.map((reference) => ({
+    imageUrl: reference.imageUrl,
+    sourceImageUrl: reference.sourceImageUrl,
+    label: reference.label,
+    sourceTitle: reference.sourceTitle
+  }));
+}
+
+function createEditImageReferences(
+  task: TaskState | null,
+  mixImages: CapturedImage[]
+): EditImageReference[] {
+  if (mixImages.length) {
+    return mixImages.map((image, index) => {
+      const prepared = task?.preparedImages?.[index];
+
+      return {
+        index: index + 1,
+        label: `@图片${index + 1}`,
+        thumbnail: image.url,
+        imageUrl: prepared?.imageUrl ?? image.url,
+        sourceImageUrl: prepared?.sourceImageUrl ?? image.url,
+        sourceTitle: image.sourceTitle
+      };
+    });
   }
 
-  if (task.preparedImages?.length) {
-    return task.preparedImages.map((image) => ({
+  if (task?.preparedImages?.length) {
+    return task.preparedImages.map((image, index) => ({
+      index: index + 1,
+      label: `@图片${index + 1}`,
+      thumbnail: image.imageUrl,
       imageUrl: image.imageUrl,
-      sourceImageUrl: image.sourceImageUrl
+      sourceImageUrl: image.sourceImageUrl,
+      sourceTitle: task.sources?.[index]?.sourceTitle
     }));
   }
 
-  if (task.preparedImage) {
+  if (task?.preparedImage) {
     return [
       {
+        index: 1,
+        label: "@图片1",
+        thumbnail: task.preparedImage.imageUrl,
         imageUrl: task.preparedImage.imageUrl,
-        sourceImageUrl: task.preparedImage.sourceImageUrl
+        sourceImageUrl: task.preparedImage.sourceImageUrl,
+        sourceTitle: task.source?.sourceTitle
+      }
+    ];
+  }
+
+  if (task?.source) {
+    return [
+      {
+        index: 1,
+        label: "@图片1",
+        thumbnail: task.source.url,
+        imageUrl: task.source.url,
+        sourceImageUrl: task.source.url,
+        sourceTitle: task.source.sourceTitle
       }
     ];
   }

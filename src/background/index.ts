@@ -66,6 +66,8 @@ interface TaskState {
 interface EditVisualReference {
   imageUrl: string;
   sourceImageUrl?: string;
+  label?: string;
+  sourceTitle?: string;
 }
 
 interface RuntimeResponse<T = unknown> {
@@ -79,6 +81,7 @@ type RuntimeRequest =
   | { type: "panel:get-mix" }
   | { type: "panel:analyze-image"; image: CapturedImage }
   | { type: "panel:analyze-mix"; images?: CapturedImage[] }
+  | { type: "panel:add-mix-images"; images: CapturedImage[] }
   | { type: "panel:clear-mix" }
   | { type: "panel:remove-mix-image"; url: string }
   | {
@@ -147,7 +150,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 
   if (info.menuItemId === MENU_ADD_TO_MIX) {
     const image = createCapturedImage(info, tab);
-    void addMixImage(image).then(() => openPanel(tab));
+    void addMixImages([image]).then(() => openPanel(tab));
   }
 });
 
@@ -222,6 +225,9 @@ async function handleRuntimeMessage(message: RuntimeRequest): Promise<unknown> {
 
     case "panel:analyze-mix":
       return startAnalyzeMixTask(message.images ?? mixImages);
+
+    case "panel:add-mix-images":
+      return addMixImages(message.images);
 
     case "panel:clear-mix":
       mixImages = [];
@@ -852,16 +858,15 @@ function createCapturedImage(
   };
 }
 
-async function addMixImage(image: CapturedImage): Promise<void> {
-  if (!image.url.trim()) {
-    return;
-  }
-
+async function addMixImages(images: CapturedImage[]): Promise<CapturedImage[]> {
   await loadMixImages();
-  const withoutDuplicate = mixImages.filter((item) => item.url !== image.url);
-  mixImages = [image, ...withoutDuplicate].slice(0, MAX_MIX_IMAGES);
+  const nextImages = images.filter((image) => image.url.trim());
+  const nextUrls = new Set(nextImages.map((image) => image.url));
+  const withoutDuplicates = mixImages.filter((image) => !nextUrls.has(image.url));
+  mixImages = [...nextImages, ...withoutDuplicates].slice(0, MAX_MIX_IMAGES);
   await saveMixImages(mixImages);
   void broadcastMixUpdated();
+  return mixImages;
 }
 
 async function loadMixImages(): Promise<CapturedImage[]> {

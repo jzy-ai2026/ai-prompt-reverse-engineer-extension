@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   ClipboardPaste,
   ImagePlus,
+  Images,
   Layers,
   RefreshCw,
   Trash2,
@@ -33,9 +34,12 @@ interface ImagePreviewProps {
   mixImages: CapturedImage[];
   onAnalyze: (image: CapturedImage) => void | Promise<unknown>;
   onAnalyzeMix: () => void | Promise<unknown>;
+  onAddMixImages: (images: CapturedImage[]) => void | Promise<unknown>;
   onRemoveMixImage: (url: string) => void | Promise<unknown>;
   onClearMixImages: () => void | Promise<unknown>;
 }
+
+type DropZone = "single" | "mix" | null;
 
 export function ImagePreview({
   source,
@@ -43,28 +47,41 @@ export function ImagePreview({
   mixImages,
   onAnalyze,
   onAnalyzeMix,
+  onAddMixImages,
   onRemoveMixImage,
   onClearMixImages
 }: ImagePreviewProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const mixFileInputRef = useRef<HTMLInputElement | null>(null);
   const [isReadingFile, setIsReadingFile] = useState(false);
+  const [isReadingMixFiles, setIsReadingMixFiles] = useState(false);
+  const [dropZone, setDropZone] = useState<DropZone>(null);
   const previewUrl = getPreviewUrl(source, preparedImage);
+  const isReading = isReadingFile || isReadingMixFiles;
 
   useEffect(() => {
     function handlePaste(event: ClipboardEvent) {
-      const file = getClipboardImageFile(event.clipboardData);
+      const files = getClipboardImageFiles(event.clipboardData);
 
-      if (!file || isReadingFile) {
+      if (!files.length || isReading) {
         return;
       }
 
       event.preventDefault();
-      void analyzeImageFile(file, file.name || "剪贴板截图");
+      const target = event.target instanceof Element ? event.target : null;
+      const isMixPaste = Boolean(target?.closest('[data-drop-zone="mix"]'));
+
+      if (isMixPaste || files.length > 1) {
+        void addImageFilesToMix(files);
+        return;
+      }
+
+      void analyzeImageFile(files[0]!, files[0]?.name || "剪贴板截图");
     }
 
     window.addEventListener("paste", handlePaste);
     return () => window.removeEventListener("paste", handlePaste);
-  }, [isReadingFile, onAnalyze]);
+  }, [isReading, onAnalyze]);
 
   async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -75,6 +92,99 @@ export function ImagePreview({
 
     try {
       await analyzeImageFile(file, file.name);
+    } finally {
+      event.target.value = "";
+    }
+  }
+
+  function handleSinglePaste(event: React.ClipboardEvent<HTMLElement>) {
+    const files = getClipboardImageFiles(event.clipboardData);
+
+    if (!files.length || isReading) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    void analyzeImageFile(files[0]!, files[0]?.name || "剪贴板截图");
+  }
+
+  function handleMixPaste(event: React.ClipboardEvent<HTMLElement>) {
+    const files = getClipboardImageFiles(event.clipboardData);
+
+    if (!files.length || isReading) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    void addImageFilesToMix(files);
+  }
+
+  function handleDragOver(
+    event: React.DragEvent<HTMLElement>,
+    nextDropZone: Exclude<DropZone, null>
+  ) {
+    if (!hasImageFiles(event.dataTransfer)) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setDropZone(nextDropZone);
+  }
+
+  function handleDragLeave(event: React.DragEvent<HTMLElement>) {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+      setDropZone(null);
+    }
+  }
+
+  function handleSingleDrop(event: React.DragEvent<HTMLElement>) {
+    const files = getDataTransferImageFiles(event.dataTransfer);
+
+    if (!files.length) {
+      return;
+    }
+
+    event.preventDefault();
+    setDropZone(null);
+
+    if (isReading) {
+      return;
+    }
+
+    void analyzeImageFile(files[0]!, files[0]?.name || "拖拽图片");
+  }
+
+  function handleMixDrop(event: React.DragEvent<HTMLElement>) {
+    const files = getDataTransferImageFiles(event.dataTransfer);
+
+    if (!files.length) {
+      return;
+    }
+
+    event.preventDefault();
+    setDropZone(null);
+
+    if (isReading) {
+      return;
+    }
+
+    void addImageFilesToMix(files);
+  }
+
+  async function handleMixFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []).filter((file) =>
+      file.type.startsWith("image/")
+    );
+
+    if (!files.length) {
+      return;
+    }
+
+    try {
+      await addImageFilesToMix(files);
     } finally {
       event.target.value = "";
     }
@@ -94,11 +204,27 @@ export function ImagePreview({
     }
   }
 
+  async function addImageFilesToMix(files: File[]) {
+    setIsReadingMixFiles(true);
+
+    try {
+      const images = await Promise.all(
+        files.slice(0, 6).map(async (file) => ({
+          url: await readFileAsDataUrl(file),
+          sourceTitle: file.name || "本地多图"
+        }))
+      );
+      await onAddMixImages(images);
+    } finally {
+      setIsReadingMixFiles(false);
+    }
+  }
+
   return (
     <section className="panel-section image-preview">
       <div className="section-header">
         <div>
-          <h2>参考图片</h2>
+          <h2>参考图</h2>
           {source?.sourceTitle && <p>{source.sourceTitle}</p>}
         </div>
         <div className="button-row compact">
@@ -115,14 +241,22 @@ export function ImagePreview({
             type="button"
             title="上传图片"
             onClick={() => fileInputRef.current?.click()}
-            disabled={isReadingFile}
+            disabled={isReading}
           >
             <Upload size={16} />
           </button>
         </div>
       </div>
 
-      <div className="image-frame">
+      <div
+        className={dropZone === "single" ? "image-frame is-dragging" : "image-frame"}
+        data-drop-zone="single"
+        tabIndex={0}
+        onDragOver={(event) => handleDragOver(event, "single")}
+        onDragLeave={handleDragLeave}
+        onDrop={handleSingleDrop}
+        onPaste={handleSinglePaste}
+      >
         {previewUrl ? (
           <img src={previewUrl} alt="当前参考图" />
         ) : (
@@ -131,7 +265,7 @@ export function ImagePreview({
             type="button"
             title="上传图片"
             onClick={() => fileInputRef.current?.click()}
-            disabled={isReadingFile}
+            disabled={isReading}
           >
             <ImagePlus size={28} />
             <span>上传图片或粘贴截图</span>
@@ -141,7 +275,7 @@ export function ImagePreview({
 
       <div className="paste-hint">
         <ClipboardPaste size={14} />
-        <span>截图复制后，点击侧栏按 Ctrl+V 直接上传分析</span>
+        <span>单图支持拖拽、选择文件或粘贴截图，导入后立即分析</span>
       </div>
 
       {preparedImage && (
@@ -158,25 +292,49 @@ export function ImagePreview({
         </div>
       )}
 
-      <div className="mix-tray">
+      <div
+        className={dropZone === "mix" ? "mix-tray is-dragging" : "mix-tray"}
+        data-drop-zone="mix"
+        tabIndex={0}
+        onDragOver={(event) => handleDragOver(event, "mix")}
+        onDragLeave={handleDragLeave}
+        onDrop={handleMixDrop}
+        onPaste={handleMixPaste}
+      >
         <div className="mix-tray-header">
           <div>
-            <strong>混搭队列</strong>
-            <span>{mixImages.length ? `${mixImages.length} / 6 张参考图` : "右键图片可添加"}</span>
+            <strong>多图分析</strong>
+            <span>
+              {mixImages.length
+                ? `${mixImages.length} / 6 张参考图，2 张以上可开始`
+                : "拖拽、粘贴或选择 2-6 张图，提取共同风格或组合元素"}
+            </span>
           </div>
-          <div className="button-row compact">
+          <div className="button-row compact mix-actions">
+            <button
+              className="mix-add-action"
+              type="button"
+              title="添加多张图片"
+              onClick={() => mixFileInputRef.current?.click()}
+              disabled={isReading}
+            >
+              <Images size={16} />
+              <span>添加</span>
+            </button>
             {mixImages.length > 0 && (
               <button type="button" title="清空混搭队列" onClick={onClearMixImages}>
                 <Trash2 size={16} />
               </button>
             )}
             <button
+              className="mix-primary-action"
               type="button"
-              title="混搭反推"
+              title="开始多图分析"
               onClick={onAnalyzeMix}
-              disabled={mixImages.length < 2}
+              disabled={mixImages.length < 2 || isReading}
             >
               <Layers size={16} />
+              <span>分析</span>
             </button>
           </div>
         </div>
@@ -186,6 +344,8 @@ export function ImagePreview({
             {mixImages.map((image, index) => (
               <div className="mix-image" key={image.url}>
                 <img src={image.url} alt={`混搭参考图 ${index + 1}`} />
+                <span className="mix-image-index">{index + 1}</span>
+                <span className="mix-image-label">@图片{index + 1}</span>
                 <button
                   type="button"
                   title="移除"
@@ -197,6 +357,13 @@ export function ImagePreview({
             ))}
           </div>
         )}
+
+        {mixImages.length === 0 && (
+          <div className="mix-drop-empty">
+            <Images size={18} />
+            <span>把多张图片拖到这里，或点击添加</span>
+          </div>
+        )}
       </div>
 
       <input
@@ -206,28 +373,56 @@ export function ImagePreview({
         accept="image/*"
         onChange={handleFileChange}
       />
+      <input
+        ref={mixFileInputRef}
+        className="visually-hidden"
+        type="file"
+        accept="image/*"
+        multiple
+        onChange={handleMixFileChange}
+      />
     </section>
   );
 }
 
-function getClipboardImageFile(data: DataTransfer | null): File | null {
+function getClipboardImageFiles(data: DataTransfer | null): File[] {
   if (!data) {
-    return null;
+    return [];
   }
+
+  const files: File[] = [];
 
   for (const item of Array.from(data.items)) {
     if (item.kind === "file" && item.type.startsWith("image/")) {
-      return item.getAsFile();
+      const file = item.getAsFile();
+
+      if (file) {
+        files.push(file);
+      }
     }
+  }
+
+  if (files.length) {
+    return files;
   }
 
   for (const file of Array.from(data.files)) {
     if (file.type.startsWith("image/")) {
-      return file;
+      files.push(file);
     }
   }
 
-  return null;
+  return files;
+}
+
+function getDataTransferImageFiles(data: DataTransfer): File[] {
+  return Array.from(data.files).filter((file) => file.type.startsWith("image/"));
+}
+
+function hasImageFiles(data: DataTransfer): boolean {
+  return Array.from(data.items).some(
+    (item) => item.kind === "file" && item.type.startsWith("image/")
+  );
 }
 
 function getPreviewUrl(

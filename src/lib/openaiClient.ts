@@ -57,6 +57,8 @@ export interface AnalyzeImageMixInput {
 export interface EditVisualReference {
   imageUrl: string;
   sourceImageUrl?: string;
+  label?: string;
+  sourceTitle?: string;
 }
 
 export interface EditPromptInput {
@@ -415,6 +417,18 @@ function createEditUserContent(input: EditPromptInput): ChatContent {
     input.document.template_output !== undefined
       ? input.document.template_output
       : input.document;
+  const referenceGuide = input.visualReferences?.length
+    ? [
+        "",
+        "视觉参考顺序：",
+        ...input.visualReferences.map((reference, index) => {
+          const label = reference.label || `@图片${index + 1}`;
+          const title = reference.sourceTitle?.trim();
+          return title ? `${label}：${title}` : `${label}：第 ${index + 1} 张视觉参考图`;
+        }),
+        "如果修改指令出现 @图片1、@图片2 等引用，请严格按以上顺序理解对应图片。"
+      ].join("\n")
+    : "";
   const textPart = [
     input.document.template_output !== undefined
       ? "当前模板输出 JSON："
@@ -424,6 +438,7 @@ function createEditUserContent(input: EditPromptInput): ChatContent {
     input.visualReferences?.length
       ? "本次编辑模式：视觉参考。请结合原图视觉信息与 JSON 内容进行修改。"
       : "本次编辑模式：文本编辑。请只根据 JSON 内容和修改指令进行概念替换。",
+    referenceGuide,
     "",
     "修改指令：",
     input.instruction
