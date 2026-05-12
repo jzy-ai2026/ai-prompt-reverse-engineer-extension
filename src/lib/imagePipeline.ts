@@ -112,13 +112,7 @@ function createSourceImageReference(source: ImageSourceInput): string {
     return createSafeSourceImageUrl(source.url);
   }
 
-  const title = source.sourceTitle?.trim();
-
-  if (title && title !== "剪贴板截图") {
-    return `upload://${encodeURIComponent(title).slice(0, 180)}`;
-  }
-
-  return "clipboard://image";
+  return source.sourceTitle?.trim() ? "upload://image" : "clipboard://image";
 }
 
 function createSafeSourceImageUrl(url: string): string {

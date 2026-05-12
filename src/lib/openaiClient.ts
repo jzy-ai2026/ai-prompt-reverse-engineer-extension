@@ -382,8 +382,8 @@ function createAnalyzeSystemPrompt(
     template.systemPrompt,
     "",
     "【扩展输出约定】",
-    "请严格遵守当前模板的 JSON 结构输出。",
-    "如果模板结构不是 PromptDocument，也不要强行改写成 PromptDocument。",
+    "请严格遵守当前模板要求输出，不要强行改写成 PromptDocument。",
+    "不要输出 version、generated_at、template、source、metadata、confidence、contributions 等插件内部字段，除非当前模板明确要求。",
     "不要把 base64 图片内容写入 JSON。",
     "输出会被插件保存为 template_output，后续可继续被自然语言编辑。"
   ].join("\n");
@@ -395,22 +395,31 @@ function createEditSystemPrompt(template: PromptTemplate | undefined): string {
   }
 
   return [
-    EDIT_SYSTEM_PROMPT,
+    "你是一个专业的 AI 图像提示词编辑器。",
+    "用户会提供当前模板生成的 JSON 结果和自然语言修改指令。",
+    "请根据指令修改 JSON 中所有相关内容，并返回修改后的合法 JSON。",
+    "如果用户要求替换品牌、物品、材质、风格、场景或细节，请同步更新所有相关字段，避免只改一个局部字段。",
+    "不要输出 PromptDocument 包装结构，不要输出 version、generated_at、template、source、metadata、confidence、contributions 等插件内部字段。",
+    "必须只返回一个合法 JSON 对象，不要返回 Markdown、解释文字或代码块。",
     "",
     "【当前模板】",
     `模板名称：${template.name}`,
     `模板描述：${template.description}`,
     "模板 system prompt：",
-    template.systemPrompt,
-    "",
-    "编辑时必须保留当前模板输出结构。如果用户要求替换品牌、物品、材质、风格、场景或细节，请同步更新所有相关字段，避免只改一个局部字段。"
+    template.systemPrompt
   ].join("\n");
 }
 
 function createEditUserContent(input: EditPromptInput): ChatContent {
+  const currentJson =
+    input.document.template_output !== undefined
+      ? input.document.template_output
+      : input.document;
   const textPart = [
-    "当前 PromptDocument：",
-    JSON.stringify(input.document, null, 2),
+    input.document.template_output !== undefined
+      ? "当前模板输出 JSON："
+      : "当前 PromptDocument：",
+    JSON.stringify(currentJson, null, 2),
     "",
     input.visualReferences?.length
       ? "本次编辑模式：视觉参考。请结合原图视觉信息与 JSON 内容进行修改。"
@@ -481,17 +490,169 @@ function normalizeModelOutput(
 }
 
 function createTemplateOutputText(value: unknown, template?: PromptTemplate): string {
-  const prefix = template ? `${template.name}：` : "";
+  if (typeof value === "string") {
+    return value;
+  }
+
+  const extractedPrompt = extractNaturalPromptFromTemplateOutput(value);
+
+  if (extractedPrompt) {
+    return extractedPrompt;
+  }
+
+  return flattenTemplateOutputAsPrompt(value) || `${template?.name ?? "模板"}输出已生成。`;
+}
+
+function extractNaturalPromptFromTemplateOutput(value: unknown): string | null {
+  if (typeof value === "string") {
+    return normalizePromptPreviewText(value);
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const extracted = extractNaturalPromptFromTemplateOutput(item);
+
+      if (extracted) {
+        return extracted;
+      }
+    }
+
+    return null;
+  }
+
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const preferredKeys = [
+    "完整提示词",
+    "完整中文提示词",
+    "提示词",
+    "正向提示词",
+    "生成提示词",
+    "生图提示词",
+    "可直接使用的中文提示词",
+    "可直接使用的提示词",
+    "可复刻提示词",
+    "可复制提示词",
+    "中文提示词",
+    "自然语言提示词",
+    "prompt_text",
+    "raw_prompt_text",
+    "complete_prompt",
+    "positive_prompt",
+    "prompt"
+  ];
+
+  for (const key of preferredKeys) {
+    const candidate = value[key];
+
+    if (typeof candidate === "string") {
+      const normalized = normalizePromptPreviewText(candidate);
+
+      if (normalized) {
+        return normalized;
+      }
+    }
+  }
+
+  for (const [key, nestedValue] of Object.entries(value)) {
+    if (isMetadataKey(key)) {
+      continue;
+    }
+
+    const extracted = extractNaturalPromptFromTemplateOutput(nestedValue);
+
+    if (extracted) {
+      return extracted;
+    }
+  }
+
+  return null;
+}
+
+function flattenTemplateOutputAsPrompt(value: unknown): string {
+  const parts: string[] = [];
+  collectPromptLeafText(value, parts);
+  return normalizePromptPreviewText(parts.join("，")) ?? "";
+}
+
+function collectPromptLeafText(value: unknown, parts: string[], depth = 0): void {
+  if (depth > 6 || parts.length >= 80) {
+    return;
+  }
 
   if (typeof value === "string") {
-    return `${prefix}${value}`;
+    const normalized = normalizePromptPreviewText(value);
+
+    if (normalized && !isLowValuePromptText(normalized)) {
+      parts.push(normalized);
+    }
+
+    return;
   }
 
-  try {
-    return `${prefix}${JSON.stringify(value, null, 2)}`;
-  } catch {
-    return `${prefix}模板输出已生成。`;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectPromptLeafText(item, parts, depth + 1);
+    }
+
+    return;
   }
+
+  if (!isRecord(value)) {
+    return;
+  }
+
+  for (const [key, nestedValue] of Object.entries(value)) {
+    if (isMetadataKey(key)) {
+      continue;
+    }
+
+    collectPromptLeafText(nestedValue, parts, depth + 1);
+  }
+}
+
+function normalizePromptPreviewText(value: string): string | null {
+  const normalized = value
+    .replace(/\s+/g, " ")
+    .replace(/^[{[\s]+|[}\]\s]+$/g, "")
+    .trim();
+
+  if (!normalized || normalized.length < 2) {
+    return null;
+  }
+
+  return normalized;
+}
+
+function isMetadataKey(key: string): boolean {
+  return [
+    "id",
+    "url",
+    "source_url",
+    "page_url",
+    "thumbnail",
+    "template",
+    "source",
+    "metadata",
+    "generated_at",
+    "version",
+    "icon",
+    "name"
+  ].includes(key);
+}
+
+function isLowValuePromptText(value: string): boolean {
+  return (
+    value === "无明显体现" ||
+    value === "无" ||
+    value === "true" ||
+    value === "false" ||
+    /^upload:\/\//i.test(value) ||
+    /^clipboard:\/\//i.test(value) ||
+    /^https?:\/\//i.test(value)
+  );
 }
 
 function looksLikePromptDocument(value: unknown): value is PromptDocument {

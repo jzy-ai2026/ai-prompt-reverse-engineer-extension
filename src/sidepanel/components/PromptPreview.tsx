@@ -1,7 +1,7 @@
 import { Check, Copy, Save } from "lucide-react";
 import { useMemo, useState } from "react";
 import {
-  buildRawPromptText,
+  createPromptPreviewText,
   getPromptFieldKeys,
   type PromptDocument
 } from "../../lib/promptDocument";
@@ -18,8 +18,9 @@ export function PromptPreview({
   isSaving
 }: PromptPreviewProps) {
   const [copied, setCopied] = useState(false);
+  const isTemplateResult = document.template_output !== undefined;
   const promptText = useMemo(
-    () => document.raw_prompt_text || buildRawPromptText(document),
+    () => createPromptPreviewText(document),
     [document]
   );
 
@@ -55,18 +56,20 @@ export function PromptPreview({
         </div>
       )}
 
-      <div className="field-grid">
-        {getPromptFieldKeys().map((key) => {
-          const field = document.prompt[key];
+      {!isTemplateResult && (
+        <div className="field-grid">
+          {getPromptFieldKeys().map((key) => {
+            const field = document.prompt[key];
 
-          return (
-            <div className="field-chip" key={key}>
-              <span>{key}</span>
-              <strong>{Math.round(field.confidence * 100)}%</strong>
-            </div>
-          );
-        })}
-      </div>
+            return (
+              <div className="field-chip" key={key}>
+                <span>{key}</span>
+                <strong>{Math.round(field.confidence * 100)}%</strong>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </section>
   );
 }

@@ -5,7 +5,9 @@ import {
   applyFieldAssignment,
   clonePromptDocument,
   createEmptyPromptDocument,
+  createStructuredJsonText,
   normalizePromptDocument,
+  updatePromptDocumentFromStructuredJsonText,
   type PromptDocument
 } from "../lib/promptDocument";
 import {
@@ -159,7 +161,7 @@ export function App() {
 
         return nextDocument;
       });
-      setJsonText(JSON.stringify(nextDocument, null, 2));
+      setJsonText(createStructuredJsonText(nextDocument));
     },
     []
   );
@@ -255,7 +257,7 @@ export function App() {
   );
 
   useEffect(() => {
-    setJsonText(JSON.stringify(document, null, 2));
+    setJsonText(createStructuredJsonText(document));
   }, []);
 
   useEffect(() => {
@@ -320,8 +322,10 @@ export function App() {
       setJsonText(nextText);
 
       try {
-        const parsed = JSON.parse(nextText) as PromptDocument;
-        setActiveDocument(normalizePromptDocument(parsed), { pushUndo: true });
+        setActiveDocument(
+          updatePromptDocumentFromStructuredJsonText(document, nextText),
+          { pushUndo: true }
+        );
         setError(null);
       } catch {
         setError({
@@ -332,7 +336,7 @@ export function App() {
         });
       }
     },
-    [setActiveDocument]
+    [document, setActiveDocument]
   );
 
   const handleInstructionSubmit = useCallback(

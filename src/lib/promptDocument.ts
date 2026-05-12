@@ -197,11 +197,85 @@ export function normalizePromptDocument(
     metadata: normalizeMetadata(input.metadata)
   };
 
+  if (document.template_output !== undefined) {
+    const templatePromptText = createTemplateOutputPromptText(
+      document.template_output,
+      document.template?.name
+    );
+
+    if (templatePromptText) {
+      document.raw_prompt_text = templatePromptText;
+    }
+  }
+
   if (!document.raw_prompt_text.trim()) {
     document.raw_prompt_text = buildRawPromptText(document);
   }
 
   return document;
+}
+
+export function createPromptPreviewText(document: PromptDocument): string {
+  if (document.template_output !== undefined) {
+    const templatePromptText = createTemplateOutputPromptText(
+      document.template_output
+    );
+
+    if (templatePromptText) {
+      return templatePromptText;
+    }
+  }
+
+  return document.raw_prompt_text || buildRawPromptText(document);
+}
+
+export function createTemplateOutputPromptText(
+  value: unknown,
+  _templateName?: string
+): string {
+  const extracted = extractNaturalPromptFromTemplateOutput(value);
+  const promptText = extracted || flattenTemplateOutputAsPrompt(value);
+
+  if (!promptText) {
+    return "结构化结果已生成。";
+  }
+
+  return promptText;
+}
+
+export function createStructuredJsonText(document: PromptDocument): string {
+  return JSON.stringify(createStructuredJsonValue(document), null, 2);
+}
+
+export function updatePromptDocumentFromStructuredJsonText(
+  document: PromptDocument,
+  jsonText: string
+): PromptDocument {
+  const parsed = JSON.parse(jsonText) as unknown;
+
+  if (looksLikePromptDocument(parsed)) {
+    return normalizePromptDocument(parsed);
+  }
+
+  const nextDocument = normalizePromptDocument({
+    ...document,
+    template_output: parsed,
+    raw_prompt_text: createTemplateOutputPromptText(parsed),
+    negative_prompt: extractNegativePromptFromTemplateOutput(parsed) ?? document.negative_prompt
+  });
+
+  return nextDocument;
+}
+
+function createStructuredJsonValue(document: PromptDocument): unknown {
+  if (document.template_output !== undefined) {
+    return document.template_output;
+  }
+
+  return {
+    提示词: document.raw_prompt_text || buildRawPromptText(document),
+    负面提示词: document.negative_prompt
+  };
 }
 
 export function buildRawPromptText(document: PromptDocument): string {
@@ -354,7 +428,195 @@ function sanitizeStoredImageReference(value: string | undefined): string | undef
     return undefined;
   }
 
+  if (/^upload:\/\//i.test(trimmed)) {
+    return "upload://image";
+  }
+
+  if (/^clipboard:\/\//i.test(trimmed)) {
+    return "clipboard://image";
+  }
+
   return trimmed.length > 2048 ? trimmed.slice(0, 2048) : trimmed;
+}
+
+function extractNaturalPromptFromTemplateOutput(value: unknown): string | null {
+  if (typeof value === "string") {
+    return normalizePromptPreviewText(value);
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const extracted = extractNaturalPromptFromTemplateOutput(item);
+
+      if (extracted) {
+        return extracted;
+      }
+    }
+
+    return null;
+  }
+
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const preferredKeys = [
+    "完整提示词",
+    "完整中文提示词",
+    "提示词",
+    "正向提示词",
+    "生成提示词",
+    "生图提示词",
+    "可直接使用的中文提示词",
+    "可直接使用的提示词",
+    "可复刻提示词",
+    "可复制提示词",
+    "中文提示词",
+    "自然语言提示词",
+    "prompt_text",
+    "raw_prompt_text",
+    "complete_prompt",
+    "positive_prompt",
+    "prompt"
+  ];
+
+  for (const key of preferredKeys) {
+    const candidate = value[key];
+
+    if (typeof candidate === "string") {
+      const normalized = normalizePromptPreviewText(candidate);
+
+      if (normalized) {
+        return normalized;
+      }
+    }
+  }
+
+  for (const [key, nestedValue] of Object.entries(value)) {
+    if (isMetadataKey(key)) {
+      continue;
+    }
+
+    const extracted = extractNaturalPromptFromTemplateOutput(nestedValue);
+
+    if (extracted) {
+      return extracted;
+    }
+  }
+
+  return null;
+}
+
+function extractNegativePromptFromTemplateOutput(value: unknown): string | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const preferredKeys = [
+    "负面提示词",
+    "负向提示词",
+    "反向提示词",
+    "negative_prompt",
+    "negativePrompt"
+  ];
+
+  for (const key of preferredKeys) {
+    const candidate = value[key];
+
+    if (typeof candidate === "string") {
+      return normalizePromptPreviewText(candidate) ?? "";
+    }
+  }
+
+  return null;
+}
+
+function flattenTemplateOutputAsPrompt(value: unknown): string {
+  const parts: string[] = [];
+  collectPromptLeafText(value, parts);
+  return normalizePromptPreviewText(parts.join("，")) ?? "";
+}
+
+function collectPromptLeafText(value: unknown, parts: string[], depth = 0): void {
+  if (depth > 6 || parts.length >= 80) {
+    return;
+  }
+
+  if (typeof value === "string") {
+    const normalized = normalizePromptPreviewText(value);
+
+    if (normalized && !isLowValuePromptText(normalized)) {
+      parts.push(normalized);
+    }
+
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectPromptLeafText(item, parts, depth + 1);
+    }
+
+    return;
+  }
+
+  if (!isRecord(value)) {
+    return;
+  }
+
+  for (const [key, nestedValue] of Object.entries(value)) {
+    if (isMetadataKey(key)) {
+      continue;
+    }
+
+    collectPromptLeafText(nestedValue, parts, depth + 1);
+  }
+}
+
+function normalizePromptPreviewText(value: string): string | null {
+  const normalized = value
+    .replace(/\s+/g, " ")
+    .replace(/^[{[\s]+|[}\]\s]+$/g, "")
+    .trim();
+
+  if (!normalized || normalized.length < 2) {
+    return null;
+  }
+
+  return normalized;
+}
+
+function looksLikePromptDocument(value: unknown): value is PromptDocument {
+  return isRecord(value) && isRecord(value.prompt) && isRecord(value.source);
+}
+
+function isMetadataKey(key: string): boolean {
+  return [
+    "id",
+    "url",
+    "source_url",
+    "page_url",
+    "thumbnail",
+    "template",
+    "source",
+    "metadata",
+    "generated_at",
+    "version",
+    "icon",
+    "name"
+  ].includes(key);
+}
+
+function isLowValuePromptText(value: string): boolean {
+  return (
+    value === "无明显体现" ||
+    value === "无" ||
+    value === "true" ||
+    value === "false" ||
+    /^upload:\/\//i.test(value) ||
+    /^clipboard:\/\//i.test(value) ||
+    /^https?:\/\//i.test(value)
+  );
 }
 
 function normalizeMetadata(value: unknown): PromptDocument["metadata"] {

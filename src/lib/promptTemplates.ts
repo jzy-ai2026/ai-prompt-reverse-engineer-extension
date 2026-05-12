@@ -15,7 +15,7 @@ export type CustomPromptTemplateInput = Omit<PromptTemplate, "kind"> & {
   kind?: PromptTemplateKind;
 };
 
-export const DEFAULT_PROMPT_TEMPLATE_ID = "style_reverse_single";
+export const DEFAULT_PROMPT_TEMPLATE_ID = "json_prompt_reverse";
 
 const JSON_ONLY_RULES = [
   "必须且只能输出合法 JSON。",
@@ -25,6 +25,64 @@ const JSON_ONLY_RULES = [
 ].join("\n");
 
 export const BUILT_IN_PROMPT_TEMPLATES: PromptTemplate[] = [
+  {
+    id: "json_prompt_reverse",
+    name: "JSON提示词反推",
+    description: "按用户常用模板生成标准 JSON，结构清晰，便于复制和局部修改。",
+    icon: "FileJson",
+    kind: "built_in",
+    inputMode: "single_image",
+    systemPrompt: [
+      "以json格式描述这幅图，中文描述准确复制原始图图像所需的所有方面.光线、风格、身体姿势以及任何其他相关元素的具体信息,确保能够包括有关物品、服装、发型、复杂细节、配饰、摄影器材、环境、精确地重现原始图像的每一个细节。",
+      "",
+      "【输出格式】",
+      "只返回一个标准、清晰、可编辑的合法 JSON 对象。字段要足够覆盖生图需要，但不要拆成过度冗长的层级，不要输出插件内部字段。",
+      "{",
+      '  "主体": {',
+      '    "主要对象": "",',
+      '    "外观特征": "",',
+      '    "动作姿势": "",',
+      '    "表情视线": ""',
+      "  },",
+      '  "外观细节": {',
+      '    "服装发型": "",',
+      '    "物品道具": "",',
+      '    "品牌文字": "",',
+      '    "复杂细节": ""',
+      "  },",
+      '  "场景环境": {',
+      '    "环境地点": "",',
+      '    "前景中景背景": "",',
+      '    "空间关系": ""',
+      "  },",
+      '  "视觉表现": {',
+      '    "光线": "",',
+      '    "色彩": "",',
+      '    "风格": "",',
+      '    "材质质感": ""',
+      "  },",
+      '  "镜头构图": {',
+      '    "摄影器材与镜头感": "",',
+      '    "视角": "",',
+      '    "景深": "",',
+      '    "构图": ""',
+      "  },",
+      '  "画质要求": "",',
+      '  "完整提示词": "将以上信息整合成一段完整、连贯、自然、可直接复制到图像生成模型的中文提示词",',
+      '  "负面提示词": ""',
+      "}",
+      "",
+      "【约束】",
+      "- JSON 字段必须直接来自用户这段反推要求，不要加入分析备注、元数据、置信度或插件管理信息。",
+      "- 所有字段必须用中文描述，内容要具体到可以复刻原图，不要只写抽象标签。",
+      "- “完整提示词”必须是一整段可直接用于生图的自然语言，覆盖主体、物品、品牌/文字、服装、发型、复杂细节、配饰、摄影器材、环境、光线、风格、身体姿势、构图、色彩、材质和画质。",
+      "- 如果某个字段在图中不存在或无法判断，写“无明显体现”，不要编造。",
+      "- 不要输出 version、generated_at、template、source、metadata、confidence、contributions 等插件管理字段。",
+      "- 不要输出 Markdown、解释说明或 JSON 以外的文字。",
+      "- 如果没有明确负面提示词，“负面提示词”留空字符串。",
+      JSON_ONLY_RULES
+    ].join("\n")
+  },
   {
     id: "style_reverse_single",
     name: "风格提取",

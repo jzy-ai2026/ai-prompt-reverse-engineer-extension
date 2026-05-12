@@ -30,8 +30,8 @@ export function JsonEditor({
     <section className="panel-section json-editor">
       <div className="section-header">
         <div>
-          <h2>PromptDocument JSON</h2>
-          <p>可手动编辑，保存有效 JSON 后自动刷新预览</p>
+          <h2>结构化 JSON</h2>
+          <p>只展示模型生成结果，可直接编辑，合法 JSON 会同步到 Prompt 预览</p>
         </div>
         <div className="button-row compact">
           <button type="button" title="撤销" onClick={onUndo} disabled={!canUndo}>
