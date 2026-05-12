@@ -1,4 +1,4 @@
-export type PromptSourceType = "single" | "batch" | "mix";
+export type PromptSourceType = "single" | "batch" | "style_common" | "mix";
 
 export type PromptFieldKey =
   | "subject"
@@ -654,7 +654,12 @@ function normalizeTemplate(
 }
 
 function readSourceType(value: unknown, fallback: PromptSourceType): PromptSourceType {
-  if (value === "single" || value === "batch" || value === "mix") {
+  if (
+    value === "single" ||
+    value === "batch" ||
+    value === "style_common" ||
+    value === "mix"
+  ) {
     return value;
   }
 

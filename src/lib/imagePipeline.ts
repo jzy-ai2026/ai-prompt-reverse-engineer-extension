@@ -3,6 +3,11 @@ import { createAppError } from "./errors";
 export const MAX_IMAGE_LONG_EDGE = 1536;
 export const DEFAULT_JPEG_QUALITY = 0.8;
 export const MAX_DATA_URL_BYTES = 1_000_000;
+export const FAST_VISION_IMAGE_LONG_EDGE = 1024;
+export const FAST_VISION_MAX_DATA_URL_BYTES = 500_000;
+export const FAST_VISION_JPEG_QUALITY = 0.72;
+export const HISTORY_THUMBNAIL_LONG_EDGE = 240;
+export const HISTORY_THUMBNAIL_MAX_BYTES = 60_000;
 const MIN_JPEG_QUALITY = 0.45;
 const QUALITY_STEP = 0.08;
 
@@ -31,6 +36,10 @@ export interface ImagePipelineProgress {
 export interface PrepareImageOptions {
   signal?: AbortSignal;
   onProgress?: (event: ImagePipelineProgress) => void;
+  maxLongEdge?: number;
+  maxBytes?: number;
+  initialQuality?: number;
+  minQuality?: number;
 }
 
 interface EncodedImage {
@@ -39,6 +48,15 @@ interface EncodedImage {
   width: number;
   height: number;
   mimeType: string;
+}
+
+interface CompressionLimits {
+  maxLongEdge: number;
+  maxBytes: number;
+  initialQuality: number;
+  minQuality: number;
+  qualityStep: number;
+  allowNearLimit?: boolean;
 }
 
 export function canUseRemoteImageUrl(url: string): boolean {
@@ -127,6 +145,36 @@ export async function compressImageBlob(
   blob: Blob,
   options: PrepareImageOptions = {}
 ): Promise<EncodedImage> {
+  return compressImageBlobWithLimits(blob, options, {
+    maxLongEdge: options.maxLongEdge ?? MAX_IMAGE_LONG_EDGE,
+    maxBytes: options.maxBytes ?? MAX_DATA_URL_BYTES,
+    initialQuality: options.initialQuality ?? DEFAULT_JPEG_QUALITY,
+    minQuality: options.minQuality ?? MIN_JPEG_QUALITY,
+    qualityStep: QUALITY_STEP,
+    allowNearLimit: true
+  });
+}
+
+export async function createImageThumbnailDataUrl(
+  imageUrl: string,
+  options: PrepareImageOptions = {}
+): Promise<EncodedImage> {
+  const blob = await fetchImageBlob(imageUrl, options.signal);
+
+  return compressImageBlobWithLimits(blob, options, {
+    maxLongEdge: HISTORY_THUMBNAIL_LONG_EDGE,
+    maxBytes: HISTORY_THUMBNAIL_MAX_BYTES,
+    initialQuality: 0.72,
+    minQuality: 0.35,
+    qualityStep: QUALITY_STEP
+  });
+}
+
+async function compressImageBlobWithLimits(
+  blob: Blob,
+  options: PrepareImageOptions,
+  limits: CompressionLimits
+): Promise<EncodedImage> {
   if (!blob.type.startsWith("image/")) {
     throw createAppError(
       "image_fetch_failed",
@@ -155,7 +203,11 @@ export async function compressImageBlob(
   try {
     options.signal?.throwIfAborted();
 
-    const { width, height } = getScaledDimensions(bitmap.width, bitmap.height);
+    const { width, height } = getScaledDimensions(
+      bitmap.width,
+      bitmap.height,
+      limits.maxLongEdge
+    );
     const canvas = createCanvas(width, height);
     const context = canvas.getContext("2d");
 
@@ -173,10 +225,10 @@ export async function compressImageBlob(
 
     context.drawImage(bitmap, 0, 0, width, height);
 
-    let quality = DEFAULT_JPEG_QUALITY;
+    let quality = limits.initialQuality;
     let best: EncodedImage | null = null;
 
-    while (quality >= MIN_JPEG_QUALITY) {
+    while (quality >= limits.minQuality) {
       options.signal?.throwIfAborted();
 
       const dataUrl = await canvasToJpegDataUrl(canvas, quality);
@@ -189,23 +241,23 @@ export async function compressImageBlob(
         mimeType: "image/jpeg"
       };
 
-      if (sizeBytes <= MAX_DATA_URL_BYTES) {
+      if (sizeBytes <= limits.maxBytes) {
         return best;
       }
 
-      quality -= QUALITY_STEP;
+      quality -= limits.qualityStep;
     }
 
-    if (best && best.sizeBytes <= MAX_DATA_URL_BYTES * 1.15) {
+    if (limits.allowNearLimit && best && best.sizeBytes <= limits.maxBytes * 1.15) {
       return best;
     }
 
     throw createAppError(
       "image_too_large",
-      "Compressed image is still larger than 1MB.",
+      "Compressed image is still larger than the configured limit.",
       {
         sizeBytes: best?.sizeBytes,
-        maxBytes: MAX_DATA_URL_BYTES
+        maxBytes: limits.maxBytes
       }
     );
   } finally {
@@ -291,17 +343,17 @@ async function canvasToJpegDataUrl(
   return canvas.toDataURL("image/jpeg", quality);
 }
 
-function getScaledDimensions(width: number, height: number): {
+function getScaledDimensions(width: number, height: number, maxLongEdge: number): {
   width: number;
   height: number;
 } {
   const longEdge = Math.max(width, height);
 
-  if (longEdge <= MAX_IMAGE_LONG_EDGE) {
+  if (longEdge <= maxLongEdge) {
     return { width, height };
   }
 
-  const scale = MAX_IMAGE_LONG_EDGE / longEdge;
+  const scale = maxLongEdge / longEdge;
 
   return {
     width: Math.max(1, Math.round(width * scale)),

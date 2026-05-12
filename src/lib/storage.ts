@@ -19,6 +19,8 @@ const PRIVACY_CONSENT_KEY = "privacyConsent";
 const HISTORY_KEY = "promptHistory";
 const CUSTOM_PROMPT_TEMPLATES_KEY = "customPromptTemplates";
 const MAX_HISTORY_ITEMS = 20;
+const MAX_HISTORY_REFERENCE_IMAGES = 6;
+const MAX_HISTORY_INLINE_IMAGE_BYTES = 120_000;
 
 export const DEFAULT_API_BASE_URL =
   import.meta.env.VITE_DEFAULT_API_BASE_URL ||
@@ -52,10 +54,22 @@ export interface PromptHistoryItem {
   sourcePageUrl?: string;
   sourceTitle?: string;
   thumbnail?: string;
+  referenceImages?: HistoryReferenceImage[];
   summaryTitle: string;
   summarySubtitle: string;
   rawPromptText: string;
   document: PromptDocument;
+}
+
+export interface HistoryReferenceImage {
+  id: string;
+  url?: string;
+  sourceImageUrl?: string;
+  sourcePageUrl?: string;
+  sourceTitle?: string;
+  thumbnail?: string;
+  width?: number;
+  height?: number;
 }
 
 export const DEFAULT_MODEL_PRESETS = [
@@ -173,17 +187,26 @@ export async function addHistoryItem(input: {
   sourcePageUrl?: string;
   sourceTitle?: string;
   thumbnail?: string;
+  referenceImages?: HistoryReferenceImage[];
 }): Promise<PromptHistoryItem[]> {
   const document = normalizePromptDocument(input.document);
   const summary = createPromptSummary(document);
   const existing = await getHistory();
+  const referenceImages = normalizeHistoryReferenceImages(
+    input.referenceImages ?? createReferenceImagesFromDocument(document, input)
+  );
+  const thumbnail =
+    sanitizeHistoryImageReference(input.thumbnail) ??
+    referenceImages[0]?.thumbnail ??
+    referenceImages[0]?.url;
 
   const item: PromptHistoryItem = {
     id: createHistoryId(),
     createdAt: new Date().toISOString(),
     sourcePageUrl: input.sourcePageUrl,
     sourceTitle: input.sourceTitle,
-    thumbnail: input.thumbnail,
+    thumbnail,
+    referenceImages,
     summaryTitle: summary.title,
     summarySubtitle: summary.subtitle,
     rawPromptText: document.raw_prompt_text || buildRawPromptText(document),
@@ -361,14 +384,123 @@ function isPromptHistoryItem(value: unknown): value is PromptHistoryItem {
 function normalizeHistoryItem(item: PromptHistoryItem): PromptHistoryItem {
   const document = normalizePromptDocument(item.document);
   const summary = createPromptSummary(document);
+  const referenceImages = normalizeHistoryReferenceImages(
+    item.referenceImages ?? createReferenceImagesFromDocument(document, item)
+  );
+  const thumbnail =
+    sanitizeHistoryImageReference(item.thumbnail) ??
+    referenceImages[0]?.thumbnail ??
+    referenceImages[0]?.url;
 
   return {
     ...item,
+    thumbnail,
+    referenceImages,
     summaryTitle: item.summaryTitle || summary.title,
     summarySubtitle: item.summarySubtitle || summary.subtitle,
     rawPromptText: document.raw_prompt_text || buildRawPromptText(document),
     document
   };
+}
+
+function createReferenceImagesFromDocument(
+  document: PromptDocument,
+  fallback: {
+    sourcePageUrl?: string;
+    sourceTitle?: string;
+    thumbnail?: string;
+  }
+): HistoryReferenceImage[] {
+  const images = document.source.images.length
+    ? document.source.images
+    : [
+        {
+          id: "img_001",
+          source_url: fallback.thumbnail,
+          page_url: fallback.sourcePageUrl,
+          thumbnail: fallback.thumbnail
+        }
+      ];
+
+  return images.slice(0, MAX_HISTORY_REFERENCE_IMAGES).map((image, index) => ({
+    id: image.id || `img_${String(index + 1).padStart(3, "0")}`,
+    url: image.url ?? image.thumbnail ?? image.source_url,
+    sourceImageUrl: image.source_url ?? image.url,
+    sourcePageUrl: image.page_url ?? fallback.sourcePageUrl,
+    sourceTitle: fallback.sourceTitle,
+    thumbnail: image.thumbnail ?? image.url ?? image.source_url
+  }));
+}
+
+function normalizeHistoryReferenceImages(
+  images: unknown[]
+): HistoryReferenceImage[] {
+  return images
+    .filter((image) => isRecord(image))
+    .slice(0, MAX_HISTORY_REFERENCE_IMAGES)
+    .map((image, index) => ({
+      id: readString(image.id, `img_${String(index + 1).padStart(3, "0")}`),
+      url: sanitizeHistoryImageReference(readOptionalString(image.url)),
+      sourceImageUrl: sanitizeStoredSourceReference(
+        readOptionalString(image.sourceImageUrl)
+      ),
+      sourcePageUrl: readOptionalString(image.sourcePageUrl),
+      sourceTitle: readOptionalString(image.sourceTitle),
+      thumbnail: sanitizeHistoryImageReference(
+        readOptionalString(image.thumbnail) ?? readOptionalString(image.url)
+      ),
+      width: readOptionalNumber(image.width),
+      height: readOptionalNumber(image.height)
+    }))
+    .filter((image) => Boolean(image.url || image.thumbnail || image.sourceImageUrl));
+}
+
+function sanitizeHistoryImageReference(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+
+  if (!trimmed) {
+    return undefined;
+  }
+
+  if (/^data:image\//i.test(trimmed)) {
+    return estimateDataUrlBytes(trimmed) <= MAX_HISTORY_INLINE_IMAGE_BYTES
+      ? trimmed
+      : undefined;
+  }
+
+  if (/^(https?:|upload:\/\/|clipboard:\/\/)/i.test(trimmed)) {
+    return trimmed.length > 2048 && /^https?:/i.test(trimmed)
+      ? trimmed.slice(0, 2048)
+      : trimmed;
+  }
+
+  return undefined;
+}
+
+function sanitizeStoredSourceReference(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+
+  if (!trimmed || /^data:image\//i.test(trimmed)) {
+    return undefined;
+  }
+
+  return trimmed.length > 2048 && /^https?:/i.test(trimmed)
+    ? trimmed.slice(0, 2048)
+    : trimmed;
+}
+
+function estimateDataUrlBytes(dataUrl: string): number {
+  const base64 = dataUrl.split(",", 2)[1] ?? "";
+  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+  return Math.floor((base64.length * 3) / 4) - padding;
 }
 
 function containsInlineImageDataUrl(value: unknown, depth = 0): boolean {
@@ -377,7 +509,11 @@ function containsInlineImageDataUrl(value: unknown, depth = 0): boolean {
   }
 
   if (typeof value === "string") {
-    return /^data:image\//i.test(value.trim());
+    const trimmed = value.trim();
+    return (
+      /^data:image\//i.test(trimmed) &&
+      estimateDataUrlBytes(trimmed) > MAX_HISTORY_INLINE_IMAGE_BYTES
+    );
   }
 
   if (Array.isArray(value)) {
@@ -429,6 +565,10 @@ function readString(value: unknown, fallback: string): string {
 
 function readOptionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function readOptionalNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

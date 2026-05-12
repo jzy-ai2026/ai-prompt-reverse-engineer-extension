@@ -6,7 +6,8 @@ import {
   ImageIcon,
   Loader2,
   Settings,
-  Sparkles
+  Sparkles,
+  Timer
 } from "lucide-react";
 import { toUserFacingError, type UserFacingError } from "../lib/errors";
 import {
@@ -25,6 +26,7 @@ import {
   getSettings,
   saveSettings,
   type ExtensionSettings,
+  type HistoryReferenceImage,
   type PromptHistoryItem
 } from "../lib/storage";
 import type { PromptTemplate } from "../lib/promptTemplates";
@@ -43,6 +45,7 @@ type ViewMode = "workspace" | "history" | "templates" | "settings";
 type ResultView = "prompt" | "json";
 type EditMode = "auto" | "text" | "vision";
 type ResolvedEditMode = "text" | "vision";
+type MultiAnalyzeMode = "style_common" | "batch";
 
 type TaskStatus =
   | "idle"
@@ -77,16 +80,30 @@ interface TaskState {
   status: TaskStatus;
   phase?: string;
   message?: string;
+  mode?: "single" | MultiAnalyzeMode;
   createdAt: string;
   updatedAt: string;
   source?: CapturedImage;
   sources?: CapturedImage[];
   preparedImage?: PreparedImagePayload;
   preparedImages?: PreparedImagePayload[];
+  referenceImages?: HistoryReferenceImage[];
   document?: PromptDocument;
   rawText?: string;
   usedJsonMode?: boolean;
+  historySaved?: boolean;
+  timings?: TaskTimingEntry[];
   error?: UserFacingError;
+}
+
+interface TaskTimingEntry {
+  id: string;
+  label: string;
+  durationMs: number;
+  startedAt: string;
+  endedAt: string;
+  status: "done" | "error";
+  detail?: string;
 }
 
 interface RuntimeResponse<T> {
@@ -134,6 +151,9 @@ export function App() {
   const [jsonText, setJsonText] = useState("");
   const [history, setHistory] = useState<PromptHistoryItem[]>([]);
   const [mixImages, setMixImages] = useState<CapturedImage[]>([]);
+  const [activeReferenceImages, setActiveReferenceImages] = useState<
+    HistoryReferenceImage[]
+  >([]);
   const [templates, setTemplates] = useState<PromptTemplate[]>([]);
   const [settings, setSettings] = useState<ExtensionSettings | null>(null);
   const [editMode, setEditMode] = useState<EditMode>("auto");
@@ -143,6 +163,7 @@ export function App() {
   const [redoStack, setRedoStack] = useState<PromptDocument[]>([]);
   const [isSavingHistory, setIsSavingHistory] = useState(false);
   const savedTaskIds = useRef(new Set<string>());
+  const activeReferenceImagesRef = useRef<HistoryReferenceImage[]>([]);
 
   const isBusy =
     task?.status === "awaiting_consent" ||
@@ -182,10 +203,23 @@ export function App() {
   );
 
   const editImageReferences = useMemo(
-    () => createEditImageReferences(task, mixImages),
-    [mixImages, task]
+    () => createEditImageReferences(task, mixImages, activeReferenceImages),
+    [activeReferenceImages, mixImages, task]
   );
   const hasVisualEditContext = editImageReferences.length > 0;
+  const previewContext = useMemo(
+    () => createPreviewImageContext(task, activeReferenceImages),
+    [activeReferenceImages, task]
+  );
+
+  const updateActiveReferenceImages = useCallback(
+    (images: HistoryReferenceImage[]) => {
+      const nextImages = images.slice(0, 6);
+      activeReferenceImagesRef.current = nextImages;
+      setActiveReferenceImages(nextImages);
+    },
+    []
+  );
 
   const setActiveDocument = useCallback(
     (nextDocument: PromptDocument, options: { pushUndo?: boolean } = {}) => {
@@ -233,21 +267,28 @@ export function App() {
           sourcePageUrl: task?.source?.sourcePageUrl,
           sourceTitle: task?.source?.sourceTitle,
           thumbnail:
-            task?.preparedImages?.[0]?.transport === "data_url"
-              ? task.preparedImages[0].imageUrl
-              : task?.preparedImage?.transport === "data_url"
-                ? task.preparedImage.imageUrl
-              : task?.source?.url
+            activeReferenceImages[0]?.thumbnail ??
+            activeReferenceImages[0]?.url ??
+            task?.source?.url,
+          referenceImages:
+            activeReferenceImages.length > 0
+              ? activeReferenceImages
+              : createReferenceImagesFromTask(task)
         })
       );
     } finally {
       setIsSavingHistory(false);
     }
-  }, [document, task]);
+  }, [activeReferenceImages, document, task]);
 
   const handleTaskState = useCallback(
     (nextTask: TaskState) => {
       setTask(nextTask);
+      const taskReferenceImages = createReferenceImagesFromTask(nextTask);
+
+      if (taskReferenceImages.length) {
+        updateActiveReferenceImages(taskReferenceImages);
+      }
 
       if (nextTask.status === "error" && nextTask.error) {
         setError(nextTask.error);
@@ -260,23 +301,31 @@ export function App() {
         setPendingConsent(null);
         setActiveDocument(nextDocument, { pushUndo: true });
 
+        if (nextTask.historySaved) {
+          void refreshHistory();
+          return;
+        }
+
         if (!savedTaskIds.current.has(nextTask.id)) {
           savedTaskIds.current.add(nextTask.id);
+          const historyReferenceImages = taskReferenceImages.length
+            ? taskReferenceImages
+            : activeReferenceImagesRef.current;
+
           void addHistoryItem({
             document: nextDocument,
             sourcePageUrl: nextTask.source?.sourcePageUrl,
             sourceTitle: nextTask.source?.sourceTitle,
             thumbnail:
-              nextTask.preparedImages?.[0]?.transport === "data_url"
-                ? nextTask.preparedImages[0].imageUrl
-                : nextTask.preparedImage?.transport === "data_url"
-                  ? nextTask.preparedImage.imageUrl
-                : nextTask.source?.url
+              historyReferenceImages[0]?.thumbnail ??
+              historyReferenceImages[0]?.url ??
+              nextTask.source?.url,
+            referenceImages: historyReferenceImages
           }).then(setHistory);
         }
       }
     },
-    [setActiveDocument]
+    [refreshHistory, setActiveDocument, updateActiveReferenceImages]
   );
 
   const handleShortcut = useCallback(
@@ -430,17 +479,62 @@ export function App() {
     });
   }, [task?.id]);
 
-  const analyzeMix = useCallback(async () => {
+  const analyzeMulti = useCallback(async (mode: MultiAnalyzeMode) => {
     try {
       setError(null);
       await sendRuntimeMessage<TaskState>({
-        type: "panel:analyze-mix",
+        type: "panel:analyze-multi",
+        mode,
         images: mixImages
       });
     } catch (caught) {
       setError(toUserFacingError(caught));
     }
   }, [mixImages]);
+
+  const restoreHistoryItem = useCallback(
+    (item: PromptHistoryItem) => {
+      const nextDocument = normalizePromptDocument(item.document);
+      const referenceImages = (item.referenceImages ?? []).slice(0, 6);
+      const restoredMixImages =
+        referenceImages.length > 1 &&
+        (nextDocument.source.type === "style_common" ||
+          nextDocument.source.type === "mix")
+          ? referenceImages.map(historyReferenceToCapturedImage).filter(isCapturedImage)
+          : [];
+      const restoredSources = referenceImages
+        .map(historyReferenceToCapturedImage)
+        .filter(isCapturedImage);
+      const restoredPreparedImages = referenceImages
+        .map(historyReferenceToPreparedImage)
+        .filter(isPreparedImagePayload);
+
+      updateActiveReferenceImages(referenceImages);
+      setMixImages(restoredMixImages);
+      syncMixImages(restoredMixImages);
+      setTask({
+        id: `history_${item.id}`,
+        kind: "analyze",
+        status: "done",
+        mode: sourceTypeToTaskMode(nextDocument.source.type),
+        message: "已从历史恢复",
+        createdAt: item.createdAt,
+        updatedAt: new Date().toISOString(),
+        source: restoredSources[0],
+        sources: restoredSources,
+        preparedImage: restoredPreparedImages[0],
+        preparedImages: restoredPreparedImages,
+        referenceImages,
+        document: nextDocument,
+        historySaved: true
+      });
+      setActiveDocument(nextDocument, { pushUndo: true });
+      setError(null);
+      setPendingConsent(null);
+      setViewMode("workspace");
+    },
+    [setActiveDocument, updateActiveReferenceImages]
+  );
 
   const removeMixImage = useCallback(async (url: string) => {
     if (!hasExtensionRuntime()) {
@@ -531,7 +625,7 @@ export function App() {
         <div>
           <div className="eyebrow">Prompt Reverse Engineer</div>
           <h1>图片提示词反推</h1>
-          <span className="version-pill">v0.2 专业工作台</span>
+          <span className="version-pill">v0.3 专业工作台</span>
         </div>
         <nav className="icon-tabs" aria-label="面板切换">
           <button
@@ -598,6 +692,8 @@ export function App() {
                 )}
               </section>
 
+              {task?.timings?.length ? <TimingBreakdown task={task} /> : null}
+
               <section className="template-strip">
                 <div>
                   <strong>{selectedTemplate?.name ?? "默认模板"}</strong>
@@ -647,13 +743,13 @@ export function App() {
               )}
 
               <ImagePreview
-                source={task?.source}
-                preparedImage={task?.preparedImage}
+                source={previewContext.source}
+                preparedImage={previewContext.preparedImage}
                 mixImages={mixImages}
                 onAnalyze={(image) =>
                   sendRuntimeMessage({ type: "panel:analyze-image", image })
                 }
-                onAnalyzeMix={analyzeMix}
+                onAnalyzeMulti={analyzeMulti}
                 onAddMixImages={addMixImages}
                 onRemoveMixImage={removeMixImage}
                 onClearMixImages={clearMixImages}
@@ -716,10 +812,7 @@ export function App() {
         <HistoryList
           items={history}
           onRefresh={refreshHistory}
-          onSelect={(item) => {
-            setActiveDocument(item.document, { pushUndo: true });
-            setViewMode("workspace");
-          }}
+          onSelect={restoreHistoryItem}
           onChanged={setHistory}
         />
       )}
@@ -755,9 +848,70 @@ function collectVisualReferences(
   }));
 }
 
+function TimingBreakdown({ task }: { task: TaskState }) {
+  const timings = task.timings ?? [];
+  const totalDuration = getTaskWallClockDuration(task);
+  const slowest = timings.reduce<TaskTimingEntry | null>(
+    (current, timing) =>
+      !current || timing.durationMs > current.durationMs ? timing : current,
+    null
+  );
+
+  return (
+    <section className="timing-panel">
+      <div className="timing-header">
+        <strong>
+          <Timer size={14} />
+          耗时诊断
+        </strong>
+        <span>{formatDuration(totalDuration)}</span>
+      </div>
+      {slowest && (
+        <p>
+          最慢：{slowest.label} {formatDuration(slowest.durationMs)}
+        </p>
+      )}
+      <div className="timing-list">
+        {timings.map((timing) => (
+          <div className="timing-row" data-status={timing.status} key={timing.id}>
+            <span>{timing.label}</span>
+            <strong>{formatDuration(timing.durationMs)}</strong>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function getTaskWallClockDuration(task: TaskState): number {
+  const startedAt = new Date(task.createdAt).getTime();
+  const endedAt = new Date(task.updatedAt).getTime();
+
+  if (!Number.isFinite(startedAt) || !Number.isFinite(endedAt)) {
+    return task.timings?.reduce((total, timing) => total + timing.durationMs, 0) ?? 0;
+  }
+
+  return Math.max(0, endedAt - startedAt);
+}
+
+function formatDuration(durationMs: number): string {
+  if (durationMs < 1000) {
+    return `${Math.round(durationMs)}ms`;
+  }
+
+  if (durationMs < 60_000) {
+    return `${(durationMs / 1000).toFixed(durationMs < 10_000 ? 1 : 0)}s`;
+  }
+
+  const minutes = Math.floor(durationMs / 60_000);
+  const seconds = Math.round((durationMs % 60_000) / 1000);
+  return `${minutes}m ${seconds}s`;
+}
+
 function createEditImageReferences(
   task: TaskState | null,
-  mixImages: CapturedImage[]
+  mixImages: CapturedImage[],
+  activeReferenceImages: HistoryReferenceImage[]
 ): EditImageReference[] {
   if (mixImages.length) {
     return mixImages.map((image, index) => {
@@ -811,7 +965,166 @@ function createEditImageReferences(
     ];
   }
 
+  if (activeReferenceImages.length) {
+    const references: EditImageReference[] = [];
+
+    activeReferenceImages.forEach((reference, index) => {
+      const imageUrl = getReferenceImageUrl(reference);
+
+      if (!imageUrl) {
+        return;
+      }
+
+      references.push({
+        index: index + 1,
+        label: `@图片${index + 1}`,
+        thumbnail: reference.thumbnail ?? imageUrl,
+        imageUrl,
+        sourceImageUrl: reference.sourceImageUrl ?? imageUrl,
+        sourceTitle: reference.sourceTitle
+      });
+    });
+
+    return references;
+  }
+
   return [];
+}
+
+function createPreviewImageContext(
+  task: TaskState | null,
+  activeReferenceImages: HistoryReferenceImage[]
+): { source?: CapturedImage; preparedImage?: PreparedImagePayload } {
+  if (task?.source || task?.preparedImage) {
+    return {
+      source: task.source,
+      preparedImage: task.preparedImage
+    };
+  }
+
+  const firstReference = activeReferenceImages[0];
+
+  if (!firstReference) {
+    return {};
+  }
+  const source = historyReferenceToCapturedImage(firstReference) ?? undefined;
+  const preparedImage = historyReferenceToPreparedImage(firstReference) ?? undefined;
+
+  return {
+    source,
+    preparedImage
+  };
+}
+
+function createReferenceImagesFromTask(
+  task: TaskState | null
+): HistoryReferenceImage[] {
+  if (!task) {
+    return [];
+  }
+
+  if (task.referenceImages?.length) {
+    return task.referenceImages.slice(0, 6);
+  }
+
+  const preparedImages = task.preparedImages?.length
+    ? task.preparedImages
+    : task.preparedImage
+      ? [task.preparedImage]
+      : [];
+  const sources = task.sources?.length ? task.sources : task.source ? [task.source] : [];
+  const count = Math.max(preparedImages.length, sources.length);
+
+  return Array.from({ length: Math.min(count, 6) }, (_, index) => {
+    const preparedImage = preparedImages[index];
+    const source = sources[index];
+    const imageUrl = preparedImage?.imageUrl ?? source?.url;
+
+    return {
+      id: `img_${String(index + 1).padStart(3, "0")}`,
+      url: imageUrl,
+      sourceImageUrl: preparedImage?.sourceImageUrl ?? source?.url,
+      sourcePageUrl: source?.sourcePageUrl,
+      sourceTitle: source?.sourceTitle,
+      thumbnail: imageUrl,
+      width: preparedImage?.width,
+      height: preparedImage?.height
+    };
+  }).filter((reference) => Boolean(reference.url || reference.sourceImageUrl));
+}
+
+function historyReferenceToCapturedImage(
+  reference: HistoryReferenceImage
+): CapturedImage | null {
+  const imageUrl = getReferenceImageUrl(reference);
+
+  if (!imageUrl) {
+    return null;
+  }
+
+  return {
+    url: imageUrl,
+    sourcePageUrl: reference.sourcePageUrl,
+    sourceTitle: reference.sourceTitle
+  };
+}
+
+function historyReferenceToPreparedImage(
+  reference: HistoryReferenceImage
+): PreparedImagePayload | null {
+  const imageUrl = getReferenceImageUrl(reference);
+
+  if (!imageUrl) {
+    return null;
+  }
+
+  return {
+    imageUrl,
+    sourceImageUrl: reference.sourceImageUrl ?? imageUrl,
+    transport: imageUrl.startsWith("data:image/") ? "data_url" : "remote_url",
+    width: reference.width,
+    height: reference.height,
+    wasCompressed: imageUrl.startsWith("data:image/")
+  };
+}
+
+function getReferenceImageUrl(reference: HistoryReferenceImage): string | undefined {
+  return reference.url ?? reference.thumbnail ?? reference.sourceImageUrl;
+}
+
+function isCapturedImage(value: CapturedImage | null): value is CapturedImage {
+  return Boolean(value?.url);
+}
+
+function isPreparedImagePayload(
+  value: PreparedImagePayload | null
+): value is PreparedImagePayload {
+  return Boolean(value?.imageUrl);
+}
+
+function sourceTypeToTaskMode(
+  sourceType: PromptDocument["source"]["type"]
+): "single" | MultiAnalyzeMode {
+  if (sourceType === "style_common" || sourceType === "mix") {
+    return "style_common";
+  }
+
+  if (sourceType === "batch") {
+    return "batch";
+  }
+
+  return "single";
+}
+
+function syncMixImages(images: CapturedImage[]): void {
+  if (!hasExtensionRuntime()) {
+    return;
+  }
+
+  void sendRuntimeMessage<CapturedImage[]>({
+    type: "panel:set-mix-images",
+    images
+  }).catch(() => undefined);
 }
 
 async function sendRuntimeMessage<T>(message: unknown): Promise<T> {

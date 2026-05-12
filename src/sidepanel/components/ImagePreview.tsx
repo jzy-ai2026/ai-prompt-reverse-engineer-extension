@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ClipboardPaste,
+  FolderOpen,
   ImagePlus,
   Images,
   Layers,
+  ListChecks,
   RefreshCw,
   Trash2,
   Upload,
@@ -33,7 +35,7 @@ interface ImagePreviewProps {
   preparedImage?: PreparedImagePayload;
   mixImages: CapturedImage[];
   onAnalyze: (image: CapturedImage) => void | Promise<unknown>;
-  onAnalyzeMix: () => void | Promise<unknown>;
+  onAnalyzeMulti: (mode: "style_common" | "batch") => void | Promise<unknown>;
   onAddMixImages: (images: CapturedImage[]) => void | Promise<unknown>;
   onRemoveMixImage: (url: string) => void | Promise<unknown>;
   onClearMixImages: () => void | Promise<unknown>;
@@ -41,18 +43,26 @@ interface ImagePreviewProps {
 
 type DropZone = "single" | "mix" | null;
 
+const MAX_MIX_IMAGE_FILES = 6;
+const IMAGE_FILE_EXTENSION_PATTERN = /\.(avif|bmp|gif|jpe?g|png|webp)$/i;
+const DIRECTORY_INPUT_ATTRIBUTES = {
+  directory: "",
+  webkitdirectory: ""
+};
+
 export function ImagePreview({
   source,
   preparedImage,
   mixImages,
   onAnalyze,
-  onAnalyzeMix,
+  onAnalyzeMulti,
   onAddMixImages,
   onRemoveMixImage,
   onClearMixImages
 }: ImagePreviewProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const mixFileInputRef = useRef<HTMLInputElement | null>(null);
+  const mixFolderInputRef = useRef<HTMLInputElement | null>(null);
   const [isReadingFile, setIsReadingFile] = useState(false);
   const [isReadingMixFiles, setIsReadingMixFiles] = useState(false);
   const [dropZone, setDropZone] = useState<DropZone>(null);
@@ -175,9 +185,7 @@ export function ImagePreview({
   }
 
   async function handleMixFileChange(event: React.ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(event.target.files ?? []).filter((file) =>
-      file.type.startsWith("image/")
-    );
+    const files = collectImageFiles(event.target.files ?? []);
 
     if (!files.length) {
       return;
@@ -209,9 +217,9 @@ export function ImagePreview({
 
     try {
       const images = await Promise.all(
-        files.slice(0, 6).map(async (file) => ({
+        files.slice(0, MAX_MIX_IMAGE_FILES).map(async (file) => ({
           url: await readFileAsDataUrl(file),
-          sourceTitle: file.name || "本地多图"
+          sourceTitle: file.webkitRelativePath || file.name || "本地多图"
         }))
       );
       await onAddMixImages(images);
@@ -303,38 +311,58 @@ export function ImagePreview({
       >
         <div className="mix-tray-header">
           <div>
-            <strong>多图分析</strong>
+            <strong>多图参考</strong>
             <span>
               {mixImages.length
                 ? `${mixImages.length} / 6 张参考图，2 张以上可开始`
-                : "拖拽、粘贴或选择 2-6 张图，提取共同风格或组合元素"}
+                : "拖拽、粘贴或选择 2-6 张图，可同风格分析或逐张批量反推"}
             </span>
           </div>
           <div className="button-row compact mix-actions">
             <button
               className="mix-add-action"
               type="button"
-              title="添加多张图片"
+              title="多选图片"
               onClick={() => mixFileInputRef.current?.click()}
               disabled={isReading}
             >
               <Images size={16} />
-              <span>添加</span>
+              <span>多选</span>
+            </button>
+            <button
+              className="mix-folder-action"
+              type="button"
+              title="导入文件夹"
+              onClick={() => mixFolderInputRef.current?.click()}
+              disabled={isReading}
+            >
+              <FolderOpen size={16} />
+              <span>文件夹</span>
             </button>
             {mixImages.length > 0 && (
-              <button type="button" title="清空混搭队列" onClick={onClearMixImages}>
+              <button type="button" title="清空多图参考" onClick={onClearMixImages}>
                 <Trash2 size={16} />
               </button>
             )}
             <button
               className="mix-primary-action"
               type="button"
-              title="开始多图分析"
-              onClick={onAnalyzeMix}
+              title="同风格分析"
+              onClick={() => onAnalyzeMulti("style_common")}
               disabled={mixImages.length < 2 || isReading}
             >
               <Layers size={16} />
-              <span>分析</span>
+              <span>同风格</span>
+            </button>
+            <button
+              className="mix-batch-action"
+              type="button"
+              title="批量分析"
+              onClick={() => onAnalyzeMulti("batch")}
+              disabled={mixImages.length < 2 || isReading}
+            >
+              <ListChecks size={16} />
+              <span>批量</span>
             </button>
           </div>
         </div>
@@ -343,7 +371,7 @@ export function ImagePreview({
           <div className="mix-image-grid">
             {mixImages.map((image, index) => (
               <div className="mix-image" key={image.url}>
-                <img src={image.url} alt={`混搭参考图 ${index + 1}`} />
+                <img src={image.url} alt={`多图参考图 ${index + 1}`} />
                 <span className="mix-image-index">{index + 1}</span>
                 <span className="mix-image-label">@图片{index + 1}</span>
                 <button
@@ -381,8 +409,35 @@ export function ImagePreview({
         multiple
         onChange={handleMixFileChange}
       />
+      <input
+        ref={mixFolderInputRef}
+        className="visually-hidden"
+        type="file"
+        multiple
+        {...DIRECTORY_INPUT_ATTRIBUTES}
+        onChange={handleMixFileChange}
+      />
     </section>
   );
+}
+
+function collectImageFiles(files: FileList | File[]): File[] {
+  return Array.from(files)
+    .filter(isImageFile)
+    .sort((left, right) =>
+      getFileSortKey(left).localeCompare(getFileSortKey(right), undefined, {
+        numeric: true,
+        sensitivity: "base"
+      })
+    );
+}
+
+function isImageFile(file: File): boolean {
+  return file.type.startsWith("image/") || IMAGE_FILE_EXTENSION_PATTERN.test(file.name);
+}
+
+function getFileSortKey(file: File): string {
+  return file.webkitRelativePath || file.name;
 }
 
 function getClipboardImageFiles(data: DataTransfer | null): File[] {
@@ -393,10 +448,13 @@ function getClipboardImageFiles(data: DataTransfer | null): File[] {
   const files: File[] = [];
 
   for (const item of Array.from(data.items)) {
-    if (item.kind === "file" && item.type.startsWith("image/")) {
+    if (
+      item.kind === "file" &&
+      (item.type.startsWith("image/") || !item.type)
+    ) {
       const file = item.getAsFile();
 
-      if (file) {
+      if (file && isImageFile(file)) {
         files.push(file);
       }
     }
@@ -407,7 +465,7 @@ function getClipboardImageFiles(data: DataTransfer | null): File[] {
   }
 
   for (const file of Array.from(data.files)) {
-    if (file.type.startsWith("image/")) {
+    if (isImageFile(file)) {
       files.push(file);
     }
   }
@@ -416,13 +474,17 @@ function getClipboardImageFiles(data: DataTransfer | null): File[] {
 }
 
 function getDataTransferImageFiles(data: DataTransfer): File[] {
-  return Array.from(data.files).filter((file) => file.type.startsWith("image/"));
+  return collectImageFiles(data.files);
 }
 
 function hasImageFiles(data: DataTransfer): boolean {
-  return Array.from(data.items).some(
-    (item) => item.kind === "file" && item.type.startsWith("image/")
-  );
+  const items = Array.from(data.items);
+
+  if (items.some((item) => item.kind === "file" && item.type.startsWith("image/"))) {
+    return true;
+  }
+
+  return Array.from(data.files).some(isImageFile);
 }
 
 function getPreviewUrl(

@@ -2,6 +2,7 @@ import { createAppError, isAppError } from "./errors";
 import {
   normalizePromptDocument,
   type NormalizePromptDocumentOptions,
+  type PromptSourceType,
   type SourceImage,
   type PromptDocument
 } from "./promptDocument";
@@ -32,11 +33,15 @@ export interface ApiProgressEvent {
   message?: string;
 }
 
+export type VisionImageDetail = "low" | "high" | "auto";
+
 export interface AnalyzeImageInput {
   imageUrl: string;
   sourcePageUrl?: string;
   sourceTitle?: string;
   sourceImageUrl?: string;
+  sourceType?: Extract<PromptSourceType, "single" | "batch">;
+  imageDetail?: VisionImageDetail;
   template?: PromptTemplate;
   signal?: AbortSignal;
   onProgress?: (event: ApiProgressEvent) => void;
@@ -49,6 +54,7 @@ export interface AnalyzeImageMixInput {
     sourcePageUrl?: string;
     sourceTitle?: string;
   }>;
+  imageDetail?: VisionImageDetail;
   template?: PromptTemplate;
   signal?: AbortSignal;
   onProgress?: (event: ApiProgressEvent) => void;
@@ -87,7 +93,7 @@ interface ImageContentPart {
   type: "image_url";
   image_url: {
     url: string;
-    detail?: "low" | "high" | "auto";
+    detail?: VisionImageDetail;
   };
 }
 
@@ -145,6 +151,7 @@ export async function analyzeImagePrompt(
 ): Promise<PromptDocumentResult> {
   validateConfig(config);
   input.onProgress?.({ phase: "uploading", message: "Preparing image payload" });
+  const sourceType = input.sourceType ?? "single";
 
   const messages: ChatMessage[] = [
     {
@@ -160,7 +167,7 @@ export async function analyzeImagePrompt(
             "请反推这张图片的生成 Prompt，并输出 PromptDocument JSON。",
             `来源页面：${input.sourcePageUrl ?? "unknown"}`,
             `页面标题：${input.sourceTitle ?? "unknown"}`,
-            "source.type 使用 single。",
+            `source.type 使用 ${sourceType}。`,
             "source.images[0].id 使用 img_001。",
             "source.images[0].source_url 使用输入图片原始 URL 或 unknown。",
             "不要把 base64 图片内容写入 JSON。",
@@ -171,7 +178,7 @@ export async function analyzeImagePrompt(
           type: "image_url",
           image_url: {
             url: input.imageUrl,
-            detail: "high"
+            detail: input.imageDetail ?? "high"
           }
         }
       ]
@@ -186,7 +193,7 @@ export async function analyzeImagePrompt(
     phase: "analyzing",
     template: input.template,
     normalizeOptions: {
-      sourceType: "single",
+      sourceType,
       sourceImageUrl: input.sourceImageUrl ?? input.imageUrl,
       sourcePageUrl: input.sourcePageUrl
     }
@@ -195,7 +202,7 @@ export async function analyzeImagePrompt(
   return result;
 }
 
-export async function analyzeImageMixPrompt(
+export async function analyzeImageStyleCommonPrompt(
   config: OpenAiGatewayConfig,
   input: AnalyzeImageMixInput
 ): Promise<PromptDocumentResult> {
@@ -204,17 +211,19 @@ export async function analyzeImageMixPrompt(
   if (input.images.length < 2) {
     throw createAppError(
       "image_not_found",
-      "混搭模式至少需要 2 张参考图。"
+      "多图同风格分析至少需要 2 张参考图。"
     );
   }
 
   const textParts = [
-    "请综合这些参考图，反推出一个融合主体、风格、光影、色彩、构图和质感的混搭 Prompt，并输出 PromptDocument JSON。",
-    "source.type 使用 mix。",
+    "请对这些参考图做同一种视觉风格的最大公约数分析，并输出当前模板要求的合法 JSON。",
+    "只提取多张图共享的美术风格、光影、色彩、构图、质感和人脸/造型风格化规律。",
+    "不要把多张图的主体、人物身份、场景叙事或道具功能混合成一个新画面。",
+    "输出保持精简：每个 JSON 字段用 1 句具体中文描述，不要写分析过程、不要列长段落。",
+    "source.type 使用 style_common。",
     "source.images 按输入顺序保留每张图片，id 使用 img_001、img_002 这样的格式。",
-    "source.images[*].contributions 请写出该图主要贡献的字段，例如 subject、style、color。",
     "不要把 base64 图片内容写入 JSON。",
-    "请用简体中文输出完整提示词，不要输出英文 Prompt。",
+    "请用简体中文输出共享风格分析，不要输出英文 Prompt。",
     "",
     "参考图来源：",
     ...input.images.map((image, index) =>
@@ -242,7 +251,7 @@ export async function analyzeImageMixPrompt(
           type: "image_url" as const,
           image_url: {
             url: image.imageUrl,
-            detail: "high" as const
+            detail: input.imageDetail ?? "low"
           }
         }))
       ]
@@ -258,7 +267,7 @@ export async function analyzeImageMixPrompt(
     phase: "analyzing",
     template: input.template,
     normalizeOptions: {
-      sourceType: "mix",
+      sourceType: "style_common",
       sourceImages
     }
   });

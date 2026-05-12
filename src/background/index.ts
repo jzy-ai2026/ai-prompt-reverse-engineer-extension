@@ -1,22 +1,31 @@
 import { createAppError, serializeError, toUserFacingError } from "../lib/errors";
 import {
+  createImageThumbnailDataUrl,
+  FAST_VISION_IMAGE_LONG_EDGE,
+  FAST_VISION_JPEG_QUALITY,
+  FAST_VISION_MAX_DATA_URL_BYTES,
   prepareImageForVision,
   type ImagePipelineProgress,
   type PreparedImagePayload
 } from "../lib/imagePipeline";
 import {
-  analyzeImageMixPrompt,
+  analyzeImageStyleCommonPrompt,
   analyzeImagePrompt,
   editPromptDocument,
   type ApiProgressEvent
 } from "../lib/openaiClient";
 import type { PromptDocument } from "../lib/promptDocument";
 import {
+  getBuiltInPromptTemplate,
+  getDefaultPromptTemplate
+} from "../lib/promptTemplates";
+import {
   addHistoryItem,
   getPrivacyConsent,
   getSelectedPromptTemplate,
   getSettings,
   savePrivacyConsent,
+  type HistoryReferenceImage,
   type PromptHistoryItem
 } from "../lib/storage";
 
@@ -37,6 +46,9 @@ type TaskStatus =
   | "cancelled";
 
 type TaskKind = "analyze" | "edit";
+type MultiAnalyzeMode = "style_common" | "batch";
+type TaskMode = "single" | MultiAnalyzeMode;
+type TaskTimingStatus = "done" | "error";
 
 interface CapturedImage {
   url: string;
@@ -51,16 +63,30 @@ interface TaskState {
   status: TaskStatus;
   phase?: string;
   message?: string;
+  mode?: TaskMode;
   createdAt: string;
   updatedAt: string;
   source?: CapturedImage;
   sources?: CapturedImage[];
   preparedImage?: PreparedImagePayload;
   preparedImages?: PreparedImagePayload[];
+  referenceImages?: HistoryReferenceImage[];
   document?: PromptDocument;
   rawText?: string;
   usedJsonMode?: boolean;
+  historySaved?: boolean;
+  timings?: TaskTimingEntry[];
   error?: ReturnType<typeof toUserFacingError>;
+}
+
+interface TaskTimingEntry {
+  id: string;
+  label: string;
+  durationMs: number;
+  startedAt: string;
+  endedAt: string;
+  status: TaskTimingStatus;
+  detail?: string;
 }
 
 interface EditVisualReference {
@@ -81,7 +107,13 @@ type RuntimeRequest =
   | { type: "panel:get-mix" }
   | { type: "panel:analyze-image"; image: CapturedImage }
   | { type: "panel:analyze-mix"; images?: CapturedImage[] }
+  | {
+      type: "panel:analyze-multi";
+      mode: MultiAnalyzeMode;
+      images?: CapturedImage[];
+    }
   | { type: "panel:add-mix-images"; images: CapturedImage[] }
+  | { type: "panel:set-mix-images"; images: CapturedImage[] }
   | { type: "panel:clear-mix" }
   | { type: "panel:remove-mix-image"; url: string }
   | {
@@ -103,6 +135,7 @@ type RuntimeRequest =
       sourcePageUrl?: string;
       sourceTitle?: string;
       thumbnail?: string;
+      referenceImages?: HistoryReferenceImage[];
     };
 
 interface ContentImageResponse {
@@ -198,7 +231,7 @@ function setupContextMenus(): void {
 
     chrome.contextMenus.create({
       id: MENU_ADD_TO_MIX,
-      title: "添加到混搭",
+      title: "添加到多图参考",
       contexts: ["image"]
     });
   });
@@ -224,10 +257,16 @@ async function handleRuntimeMessage(message: RuntimeRequest): Promise<unknown> {
       return startAnalyzeTask(message.image);
 
     case "panel:analyze-mix":
-      return startAnalyzeMixTask(message.images ?? mixImages);
+      return startAnalyzeMultiTask("style_common", message.images ?? mixImages);
+
+    case "panel:analyze-multi":
+      return startAnalyzeMultiTask(message.mode, message.images ?? mixImages);
 
     case "panel:add-mix-images":
       return addMixImages(message.images);
+
+    case "panel:set-mix-images":
+      return setMixImages(message.images);
 
     case "panel:clear-mix":
       mixImages = [];
@@ -261,7 +300,8 @@ async function handleRuntimeMessage(message: RuntimeRequest): Promise<unknown> {
         document: message.document,
         sourcePageUrl: message.sourcePageUrl,
         sourceTitle: message.sourceTitle,
-        thumbnail: message.thumbnail
+        thumbnail: message.thumbnail,
+        referenceImages: message.referenceImages
       }) satisfies Promise<PromptHistoryItem[]>;
 
     default:
@@ -280,6 +320,7 @@ async function startAnalyzeTask(image: CapturedImage): Promise<TaskState> {
     id: taskId,
     kind: "analyze",
     status: "preparing",
+    mode: "single",
     message: "正在准备图片",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -295,9 +336,12 @@ async function startAnalyzeTask(image: CapturedImage): Promise<TaskState> {
   return currentTask!;
 }
 
-async function startAnalyzeMixTask(images: CapturedImage[]): Promise<TaskState> {
+async function startAnalyzeMultiTask(
+  mode: MultiAnalyzeMode,
+  images: CapturedImage[]
+): Promise<TaskState> {
   if (images.length < 2) {
-    throw createAppError("image_not_found", "混搭模式至少需要 2 张参考图。");
+    throw createAppError("image_not_found", "多图分析至少需要 2 张参考图。");
   }
 
   cancelCurrentTask();
@@ -310,7 +354,11 @@ async function startAnalyzeMixTask(images: CapturedImage[]): Promise<TaskState> 
     id: taskId,
     kind: "analyze",
     status: "preparing",
-    message: `正在准备 ${images.length} 张参考图`,
+    mode,
+    message:
+      mode === "batch"
+        ? `正在准备批量分析：${images.length} 张参考图`
+        : `正在准备同风格分析：${images.length} 张参考图`,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     source: images[0],
@@ -319,9 +367,11 @@ async function startAnalyzeMixTask(images: CapturedImage[]): Promise<TaskState> 
 
   startHeartbeat(taskId);
 
-  void runAnalyzeMixTask(taskId, images, controller).finally(() => {
-    stopHeartbeat(taskId);
-  });
+  const task = mode === "batch"
+    ? runAnalyzeBatchTask(taskId, images, controller)
+    : runAnalyzeStyleCommonTask(taskId, images, controller);
+
+  void task.finally(() => stopHeartbeat(taskId));
 
   return currentTask!;
 }
@@ -332,14 +382,18 @@ async function runAnalyzeTask(
   controller: AbortController
 ): Promise<void> {
   try {
-    const settings = await getSettings();
-    const template = await getSelectedPromptTemplate();
+    const { settings, template } = await measureTaskStep(taskId, "读取配置", async () => ({
+      settings: await getSettings(),
+      template: await getSelectedPromptTemplate()
+    }));
 
     if (!settings.apiBaseUrl || !settings.apiKey || !settings.model) {
       throw createAppError("missing_config", "API configuration is incomplete.");
     }
 
-    const consent = await ensurePrivacyConsent(taskId);
+    const consent = await measureTaskStep(taskId, "图片上传授权", () =>
+      ensurePrivacyConsent(taskId)
+    );
 
     if (!consent.granted) {
       throw createAppError("privacy_denied", "User denied image upload.");
@@ -353,16 +407,21 @@ async function runAnalyzeTask(
       message: "正在处理图片"
     });
 
-    const preparedImage = await prepareImageForVision(
-      {
-        url: image.url,
-        sourcePageUrl: image.sourcePageUrl,
-        sourceTitle: image.sourceTitle
-      },
-      {
-        signal: controller.signal,
-        onProgress: (event) => handleImageProgress(taskId, event)
-      }
+    const preparedImage = await measureTaskStep(taskId, "图片处理", () =>
+      prepareImageForVision(
+        {
+          url: image.url,
+          sourcePageUrl: image.sourcePageUrl,
+          sourceTitle: image.sourceTitle
+        },
+        {
+          signal: controller.signal,
+          onProgress: (event) => handleImageProgress(taskId, event)
+        }
+      )
+    );
+    const referenceImagesPromise = measureTaskStep(taskId, "历史缩略图", () =>
+      createHistoryReferenceImages([image], [preparedImage], controller.signal)
     );
 
     updateCurrentTask(taskId, {
@@ -372,22 +431,25 @@ async function runAnalyzeTask(
       message: "正在调用视觉模型"
     });
 
-    const result = await analyzeImagePrompt(
-      {
-        apiBaseUrl: settings.apiBaseUrl,
-        apiKey: settings.apiKey,
-        model: settings.model
-      },
-      {
-        imageUrl: preparedImage.imageUrl,
-        sourceImageUrl: preparedImage.sourceImageUrl,
-        sourcePageUrl: image.sourcePageUrl,
-        sourceTitle: image.sourceTitle,
-        template,
-        signal: controller.signal,
-        onProgress: (event) => handleApiProgress(taskId, event)
-      }
+    const result = await measureTaskStep(taskId, "模型反推", () =>
+      analyzeImagePrompt(
+        {
+          apiBaseUrl: settings.apiBaseUrl,
+          apiKey: settings.apiKey,
+          model: settings.model
+        },
+        {
+          imageUrl: preparedImage.imageUrl,
+          sourceImageUrl: preparedImage.sourceImageUrl,
+          sourcePageUrl: image.sourcePageUrl,
+          sourceTitle: image.sourceTitle,
+          template,
+          signal: controller.signal,
+          onProgress: (event) => handleApiProgress(taskId, event)
+        }
+      )
     );
+    const referenceImages = await referenceImagesPromise;
 
     updateCurrentTask(taskId, {
       status: "done",
@@ -395,7 +457,8 @@ async function runAnalyzeTask(
       message: "分析完成",
       document: result.document,
       rawText: result.rawText,
-      usedJsonMode: result.usedJsonMode
+      usedJsonMode: result.usedJsonMode,
+      referenceImages
     });
   } catch (error) {
     handleTaskError(taskId, error);
@@ -406,20 +469,24 @@ async function runAnalyzeTask(
   }
 }
 
-async function runAnalyzeMixTask(
+async function runAnalyzeStyleCommonTask(
   taskId: string,
   images: CapturedImage[],
   controller: AbortController
 ): Promise<void> {
   try {
-    const settings = await getSettings();
-    const template = await getSelectedPromptTemplate();
+    const { settings, template } = await measureTaskStep(taskId, "读取配置", async () => ({
+      settings: await getSettings(),
+      template: getBuiltInPromptTemplate("multi_style_common")
+    }));
 
     if (!settings.apiBaseUrl || !settings.apiKey || !settings.model) {
       throw createAppError("missing_config", "API configuration is incomplete.");
     }
 
-    const consent = await ensurePrivacyConsent(taskId);
+    const consent = await measureTaskStep(taskId, "图片上传授权", () =>
+      ensurePrivacyConsent(taskId)
+    );
 
     if (!consent.granted) {
       throw createAppError("privacy_denied", "User denied image upload.");
@@ -439,62 +506,235 @@ async function runAnalyzeMixTask(
       updateCurrentTask(taskId, {
         status: "preparing",
         phase: "prepare_image",
-        message: `正在处理第 ${index + 1}/${images.length} 张参考图`
+        message: `同风格分析：正在处理第 ${index + 1}/${images.length} 张参考图`
       });
 
       preparedImages.push(
-        await prepareImageForVision(
-          {
-            url: image.url,
-            sourcePageUrl: image.sourcePageUrl,
-            sourceTitle: image.sourceTitle
-          },
-          {
-            signal: controller.signal,
-            onProgress: (event) =>
-              handleImageProgress(taskId, {
-                ...event,
-                message: `第 ${index + 1}/${images.length} 张：${event.message ?? ""}`
-              })
-          }
+        await measureTaskStep(taskId, `图片处理 ${index + 1}/${images.length}`, () =>
+          prepareImageForVision(
+            {
+              url: image.url,
+              sourcePageUrl: image.sourcePageUrl,
+              sourceTitle: image.sourceTitle
+            },
+            {
+              signal: controller.signal,
+              maxLongEdge: FAST_VISION_IMAGE_LONG_EDGE,
+              maxBytes: FAST_VISION_MAX_DATA_URL_BYTES,
+              initialQuality: FAST_VISION_JPEG_QUALITY,
+              onProgress: (event) =>
+                handleImageProgress(taskId, {
+                  ...event,
+                  message: `同风格 ${index + 1}/${images.length}：${event.message ?? ""}`
+                })
+            }
+          )
         )
       );
     }
+    const referenceImagesPromise = measureTaskStep(taskId, "历史缩略图", () =>
+      createHistoryReferenceImages(images, preparedImages, controller.signal)
+    );
 
     updateCurrentTask(taskId, {
       preparedImages,
       preparedImage: preparedImages[0],
       status: "running",
       phase: "analyzing",
-      message: "正在调用视觉模型进行混搭反推"
+      message: "正在调用视觉模型进行同风格分析"
     });
 
-    const result = await analyzeImageMixPrompt(
-      {
-        apiBaseUrl: settings.apiBaseUrl,
-        apiKey: settings.apiKey,
-        model: settings.model
-      },
-      {
-        images: preparedImages.map((preparedImage, index) => ({
-          imageUrl: preparedImage.imageUrl,
-          sourceImageUrl: preparedImage.sourceImageUrl,
-          sourcePageUrl: images[index]?.sourcePageUrl,
-          sourceTitle: images[index]?.sourceTitle
-        })),
-        template,
-        signal: controller.signal,
-        onProgress: (event) => handleApiProgress(taskId, event)
-      }
+    const result = await measureTaskStep(taskId, "同风格模型请求", () =>
+      analyzeImageStyleCommonPrompt(
+        {
+          apiBaseUrl: settings.apiBaseUrl,
+          apiKey: settings.apiKey,
+          model: settings.model
+        },
+        {
+          images: preparedImages.map((preparedImage, index) => ({
+            imageUrl: preparedImage.imageUrl,
+            sourceImageUrl: preparedImage.sourceImageUrl,
+            sourcePageUrl: images[index]?.sourcePageUrl,
+            sourceTitle: images[index]?.sourceTitle
+          })),
+          imageDetail: "low",
+          template,
+          signal: controller.signal,
+          onProgress: (event) => handleApiProgress(taskId, event)
+        }
+      )
     );
+    const referenceImages = await referenceImagesPromise;
 
     updateCurrentTask(taskId, {
       status: "done",
       phase: "done",
-      message: "混搭分析完成",
+      message: "同风格分析完成",
       document: result.document,
       rawText: result.rawText,
-      usedJsonMode: result.usedJsonMode
+      usedJsonMode: result.usedJsonMode,
+      referenceImages
+    });
+  } catch (error) {
+    handleTaskError(taskId, error);
+  } finally {
+    if (currentTask?.id === taskId) {
+      activeController = null;
+    }
+  }
+}
+
+async function runAnalyzeBatchTask(
+  taskId: string,
+  images: CapturedImage[],
+  controller: AbortController
+): Promise<void> {
+  try {
+    const { settings, selectedTemplate } = await measureTaskStep(
+      taskId,
+      "读取配置",
+      async () => ({
+        settings: await getSettings(),
+        selectedTemplate: await getSelectedPromptTemplate()
+      })
+    );
+    const template =
+      selectedTemplate.inputMode === "single_image"
+        ? selectedTemplate
+        : getDefaultPromptTemplate();
+
+    if (!settings.apiBaseUrl || !settings.apiKey || !settings.model) {
+      throw createAppError("missing_config", "API configuration is incomplete.");
+    }
+
+    const consent = await measureTaskStep(taskId, "图片上传授权", () =>
+      ensurePrivacyConsent(taskId)
+    );
+
+    if (!consent.granted) {
+      throw createAppError("privacy_denied", "User denied image upload.");
+    }
+
+    controller.signal.throwIfAborted();
+
+    const preparedImages: PreparedImagePayload[] = [];
+    let lastResult:
+      | {
+          document: PromptDocument;
+          rawText: string;
+          usedJsonMode: boolean;
+        }
+      | null = null;
+    let lastReferenceImages: HistoryReferenceImage[] = [];
+
+    for (let index = 0; index < images.length; index += 1) {
+      const image = images[index];
+
+      if (!image) {
+        continue;
+      }
+
+      updateCurrentTask(taskId, {
+        status: "preparing",
+        phase: "prepare_image",
+        source: image,
+        message: `批量分析：正在处理第 ${index + 1}/${images.length} 张参考图`
+      });
+
+      const preparedImage = await measureTaskStep(
+        taskId,
+        `图片处理 ${index + 1}/${images.length}`,
+        () =>
+          prepareImageForVision(
+            {
+              url: image.url,
+              sourcePageUrl: image.sourcePageUrl,
+              sourceTitle: image.sourceTitle
+            },
+            {
+              signal: controller.signal,
+              onProgress: (event) =>
+                handleImageProgress(taskId, {
+                  ...event,
+                  message: `批量 ${index + 1}/${images.length}：${event.message ?? ""}`
+                })
+            }
+          )
+      );
+      preparedImages.push(preparedImage);
+      const referenceImagesPromise = measureTaskStep(
+        taskId,
+        `历史缩略图 ${index + 1}/${images.length}`,
+        () => createHistoryReferenceImages([image], [preparedImage], controller.signal)
+      );
+
+      updateCurrentTask(taskId, {
+        preparedImage,
+        preparedImages,
+        status: "running",
+        phase: "analyzing",
+        message: `批量分析：正在分析第 ${index + 1}/${images.length} 张参考图`
+      });
+
+      const result = await measureTaskStep(
+        taskId,
+        `模型反推 ${index + 1}/${images.length}`,
+        () =>
+          analyzeImagePrompt(
+            {
+              apiBaseUrl: settings.apiBaseUrl,
+              apiKey: settings.apiKey,
+              model: settings.model
+            },
+            {
+              imageUrl: preparedImage.imageUrl,
+              sourceImageUrl: preparedImage.sourceImageUrl,
+              sourcePageUrl: image.sourcePageUrl,
+              sourceTitle: image.sourceTitle,
+              sourceType: "batch",
+              template,
+              signal: controller.signal,
+              onProgress: (event) => handleApiProgress(taskId, event)
+            }
+          )
+      );
+      const referenceImages = await referenceImagesPromise;
+
+      await measureTaskStep(taskId, `保存历史 ${index + 1}/${images.length}`, () =>
+        addHistoryItem({
+          document: result.document,
+          sourcePageUrl: image.sourcePageUrl,
+          sourceTitle: image.sourceTitle,
+          thumbnail: referenceImages[0]?.thumbnail ?? referenceImages[0]?.url,
+          referenceImages
+        })
+      );
+
+      lastResult = result;
+      lastReferenceImages = referenceImages;
+    }
+
+    if (!lastResult) {
+      throw createAppError("image_not_found", "没有可分析的参考图。");
+    }
+
+    const lastImage = images[images.length - 1];
+    const lastPreparedImage = preparedImages[preparedImages.length - 1];
+
+    updateCurrentTask(taskId, {
+      source: lastImage,
+      sources: images,
+      preparedImage: lastPreparedImage,
+      preparedImages,
+      referenceImages: lastReferenceImages,
+      status: "done",
+      phase: "done",
+      message: `批量分析完成，已保存 ${images.length} 条历史记录`,
+      document: lastResult.document,
+      rawText: lastResult.rawText,
+      usedJsonMode: lastResult.usedJsonMode,
+      historySaved: true
     });
   } catch (error) {
     handleTaskError(taskId, error);
@@ -550,27 +790,31 @@ async function runEditTask(
   controller: AbortController
 ): Promise<void> {
   try {
-    const settings = await getSettings();
-    const template = await getSelectedPromptTemplate();
+    const { settings, template } = await measureTaskStep(taskId, "读取配置", async () => ({
+      settings: await getSettings(),
+      template: await getSelectedPromptTemplate()
+    }));
 
     if (!settings.apiBaseUrl || !settings.apiKey || !settings.model) {
       throw createAppError("missing_config", "API configuration is incomplete.");
     }
 
-    const result = await editPromptDocument(
-      {
-        apiBaseUrl: settings.apiBaseUrl,
-        apiKey: settings.apiKey,
-        model: settings.model
-      },
-      {
-        document,
-        instruction,
-        template,
-        visualReferences,
-        signal: controller.signal,
-        onProgress: (event) => handleApiProgress(taskId, event)
-      }
+    const result = await measureTaskStep(taskId, "模型编辑", () =>
+      editPromptDocument(
+        {
+          apiBaseUrl: settings.apiBaseUrl,
+          apiKey: settings.apiKey,
+          model: settings.model
+        },
+        {
+          document,
+          instruction,
+          template,
+          visualReferences,
+          signal: controller.signal,
+          onProgress: (event) => handleApiProgress(taskId, event)
+        }
+      )
     );
 
     updateCurrentTask(taskId, {
@@ -698,6 +942,79 @@ function handleApiProgress(taskId: string, event: ApiProgressEvent): void {
     phase: event.phase,
     message: event.message,
   });
+}
+
+async function measureTaskStep<T>(
+  taskId: string,
+  label: string,
+  run: () => Promise<T>
+): Promise<T> {
+  const startedAt = new Date();
+  const startedMs = nowMs();
+
+  try {
+    const result = await run();
+    appendTaskTiming(taskId, createTaskTiming(label, startedAt, startedMs, "done"));
+    return result;
+  } catch (error) {
+    appendTaskTiming(
+      taskId,
+      createTaskTiming(label, startedAt, startedMs, "error", formatTimingError(error))
+    );
+    throw error;
+  }
+}
+
+function appendTaskTiming(taskId: string, timing: TaskTimingEntry): void {
+  if (!currentTask || currentTask.id !== taskId) {
+    return;
+  }
+
+  const timings = [...(currentTask.timings ?? []), timing].slice(-80);
+  console.info("[AI Prompt Reverse Engineer timing]", {
+    taskId,
+    label: timing.label,
+    durationMs: timing.durationMs,
+    status: timing.status,
+    detail: timing.detail
+  });
+  updateCurrentTask(taskId, { timings });
+}
+
+function createTaskTiming(
+  label: string,
+  startedAt: Date,
+  startedMs: number,
+  status: TaskTimingStatus,
+  detail?: string
+): TaskTimingEntry {
+  const endedAt = new Date();
+
+  return {
+    id: `timing_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+    label,
+    durationMs: Math.max(0, Math.round(nowMs() - startedMs)),
+    startedAt: startedAt.toISOString(),
+    endedAt: endedAt.toISOString(),
+    status,
+    detail
+  };
+}
+
+function nowMs(): number {
+  return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
+
+function formatTimingError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (typeof error === "object" && error !== null && "message" in error) {
+    return String((error as { message?: unknown }).message ?? "Unknown error");
+  }
+
+  return String(error);
 }
 
 function handleTaskError(taskId: string, error: unknown): void {
@@ -867,6 +1184,74 @@ async function addMixImages(images: CapturedImage[]): Promise<CapturedImage[]> {
   await saveMixImages(mixImages);
   void broadcastMixUpdated();
   return mixImages;
+}
+
+async function setMixImages(images: CapturedImage[]): Promise<CapturedImage[]> {
+  mixImages = images.filter(isCapturedImage).slice(0, MAX_MIX_IMAGES);
+  await saveMixImages(mixImages);
+  void broadcastMixUpdated();
+  return mixImages;
+}
+
+async function createHistoryReferenceImages(
+  images: CapturedImage[],
+  preparedImages: PreparedImagePayload[],
+  signal?: AbortSignal
+): Promise<HistoryReferenceImage[]> {
+  const references = await Promise.all(
+    images.slice(0, MAX_MIX_IMAGES).map(async (image, index) => {
+      const preparedImage = preparedImages[index];
+      const thumbnail = preparedImage
+        ? await createHistoryThumbnail(preparedImage.imageUrl, signal)
+        : undefined;
+
+      return {
+        id: `img_${String(index + 1).padStart(3, "0")}`,
+        url: thumbnail?.dataUrl ?? createFallbackReferenceUrl(image.url),
+        sourceImageUrl: preparedImage?.sourceImageUrl ?? createFallbackReferenceUrl(image.url),
+        sourcePageUrl: image.sourcePageUrl,
+        sourceTitle: image.sourceTitle,
+        thumbnail: thumbnail?.dataUrl ?? createFallbackReferenceUrl(image.url),
+        width: thumbnail?.width ?? preparedImage?.width,
+        height: thumbnail?.height ?? preparedImage?.height
+      } satisfies HistoryReferenceImage;
+    })
+  );
+
+  return references.filter((reference) =>
+    Boolean(reference.url || reference.thumbnail || reference.sourceImageUrl)
+  );
+}
+
+async function createHistoryThumbnail(
+  imageUrl: string,
+  signal?: AbortSignal
+): Promise<{ dataUrl: string; width: number; height: number } | undefined> {
+  try {
+    const thumbnail = await createImageThumbnailDataUrl(imageUrl, { signal });
+
+    return {
+      dataUrl: thumbnail.dataUrl,
+      width: thumbnail.width,
+      height: thumbnail.height
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function createFallbackReferenceUrl(url: string): string | undefined {
+  const trimmed = url.trim();
+
+  if (/^https?:\/\//i.test(trimmed) || /^upload:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+
+  if (/^clipboard:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+
+  return undefined;
 }
 
 async function loadMixImages(): Promise<CapturedImage[]> {

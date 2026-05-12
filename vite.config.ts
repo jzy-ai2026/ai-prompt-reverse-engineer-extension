@@ -1,5 +1,5 @@
 import react from "@vitejs/plugin-react";
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { defineConfig, type Plugin } from "vite";
 
@@ -23,8 +23,24 @@ function copyManifestPlugin(): Plugin {
   };
 }
 
+function copyExtensionAssetsPlugin(): Plugin {
+  return {
+    name: "copy-extension-assets",
+    closeBundle() {
+      const iconsPath = resolve(rootDir, "icons");
+      const targetPath = resolve(distDir, "icons");
+
+      if (!existsSync(iconsPath)) {
+        return;
+      }
+
+      cpSync(iconsPath, targetPath, { recursive: true });
+    }
+  };
+}
+
 export default defineConfig({
-  plugins: [react(), copyManifestPlugin()],
+  plugins: [react(), copyManifestPlugin(), copyExtensionAssetsPlugin()],
   build: {
     outDir: "dist",
     emptyOutDir: true,

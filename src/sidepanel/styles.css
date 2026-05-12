@@ -249,6 +249,7 @@ select:focus-visible {
 
 .panel-section,
 .status-strip,
+.timing-panel,
 .template-strip,
 .error-panel,
 .consent-panel,
@@ -261,6 +262,7 @@ select:focus-visible {
 }
 
 .panel-section,
+.timing-panel,
 .template-strip,
 .error-panel,
 .consent-panel,
@@ -296,6 +298,66 @@ select:focus-visible {
   border-color: #bfdbfe;
   background: #f8fbff;
   color: #1e3a8a;
+}
+
+.timing-panel {
+  display: grid;
+  gap: 8px;
+  border-left: 3px solid var(--accent-warm);
+}
+
+.timing-header,
+.timing-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.timing-header strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.timing-header span {
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.timing-panel p {
+  margin: 0;
+  color: var(--muted-strong);
+  font-size: 12px;
+}
+
+.timing-list {
+  display: grid;
+  gap: 5px;
+}
+
+.timing-row {
+  min-height: 26px;
+  padding: 4px 7px;
+  border: 1px solid rgba(111, 113, 106, 0.18);
+  border-radius: 7px;
+  background: rgba(246, 243, 235, 0.72);
+  color: var(--muted-strong);
+  font-size: 12px;
+}
+
+.timing-row[data-status="error"] {
+  border-color: rgba(174, 45, 34, 0.32);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.timing-row strong {
+  color: var(--text);
+  font-size: 12px;
 }
 
 .template-strip {
@@ -1225,6 +1287,7 @@ textarea {
 
 .panel-section,
 .status-strip,
+.timing-panel,
 .template-strip,
 .error-panel,
 .consent-panel,
@@ -1939,6 +2002,7 @@ button:hover:not(:disabled) {
 
 .panel-section,
 .status-strip,
+.timing-panel,
 .template-strip,
 .error-panel,
 .consent-panel,
@@ -2259,14 +2323,18 @@ button:hover:not(:disabled) {
 }
 
 .mix-actions .mix-add-action,
-.mix-actions .mix-primary-action {
+.mix-actions .mix-folder-action,
+.mix-actions .mix-primary-action,
+.mix-actions .mix-batch-action {
   width: auto;
   min-width: 72px;
   padding: 0 10px;
 }
 
 .button-row.compact.mix-actions button.mix-add-action,
-.button-row.compact.mix-actions button.mix-primary-action {
+.button-row.compact.mix-actions button.mix-folder-action,
+.button-row.compact.mix-actions button.mix-primary-action,
+.button-row.compact.mix-actions button.mix-batch-action {
   width: auto;
   min-width: 72px;
   padding: 0 10px;
@@ -2281,6 +2349,17 @@ button:hover:not(:disabled) {
 .mix-primary-action:hover:not(:disabled) {
   border-color: var(--accent-strong);
   background: var(--accent-strong);
+}
+
+.mix-batch-action:not(:disabled) {
+  border-color: rgba(183, 120, 35, 0.58);
+  background: var(--accent-warm-soft);
+  color: #734900;
+}
+
+.mix-batch-action:hover:not(:disabled) {
+  border-color: var(--accent-warm);
+  background: #ffe6b5;
 }
 
 .mix-actions button span {
@@ -2431,19 +2510,23 @@ button:hover:not(:disabled) {
   }
 
   .mix-actions .icon-danger,
-  .mix-actions button[title="清空混搭队列"] {
+  .mix-actions button[title="清空多图参考"] {
     grid-column: 1 / -1;
     width: 100%;
   }
 
   .mix-actions .mix-add-action,
-  .mix-actions .mix-primary-action {
+  .mix-actions .mix-folder-action,
+  .mix-actions .mix-primary-action,
+  .mix-actions .mix-batch-action {
     width: 100%;
     min-width: 0;
   }
 
   .button-row.compact.mix-actions button.mix-add-action,
-  .button-row.compact.mix-actions button.mix-primary-action {
+  .button-row.compact.mix-actions button.mix-folder-action,
+  .button-row.compact.mix-actions button.mix-primary-action,
+  .button-row.compact.mix-actions button.mix-batch-action {
     width: 100%;
     min-width: 0;
   }
