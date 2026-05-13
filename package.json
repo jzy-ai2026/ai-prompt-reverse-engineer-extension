@@ -1,6 +1,6 @@
 {
   "name": "prompt-reverse-engineer-extension",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Chrome Extension MVP for reverse engineering image prompts through an OpenAI-compatible AI gateway.",
   "type": "module",
