@@ -5,6 +5,7 @@ import {
   History,
   ImageIcon,
   Loader2,
+  MessageSquareText,
   Settings,
   Sparkles,
   Timer
@@ -25,10 +26,15 @@ import {
   getPromptTemplates,
   getSettings,
   saveSettings,
+  type AssistantHistoryItem,
   type ExtensionSettings,
   type HistoryReferenceImage,
   type PromptHistoryItem
 } from "../lib/storage";
+import type {
+  AssistantPromptInput,
+  AssistantPromptResult
+} from "../lib/openaiClient";
 import type { PromptTemplate } from "../lib/promptTemplates";
 import { HistoryList } from "./components/HistoryList";
 import { ImagePreview } from "./components/ImagePreview";
@@ -40,8 +46,10 @@ import { JsonEditor } from "./components/JsonEditor";
 import { PromptPreview } from "./components/PromptPreview";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { TemplateManager } from "./components/TemplateManager";
+import { NanoBananaAssistant } from "./components/NanoBananaAssistant";
+import { Tooltip } from "./components/Tooltip";
 
-type ViewMode = "workspace" | "history" | "templates" | "settings";
+type ViewMode = "workspace" | "assistant" | "history" | "templates" | "settings";
 type ResultView = "prompt" | "json";
 type EditMode = "auto" | "text" | "vision";
 type ResolvedEditMode = "text" | "vision";
@@ -93,6 +101,9 @@ interface TaskState {
   usedJsonMode?: boolean;
   historySaved?: boolean;
   timings?: TaskTimingEntry[];
+  progressPercent?: number;
+  progressLabel?: string;
+  progressDetail?: string;
   error?: UserFacingError;
 }
 
@@ -110,6 +121,11 @@ interface RuntimeResponse<T> {
   ok: boolean;
   data?: T;
   error?: unknown;
+}
+
+interface AssistantGenerateResponse {
+  result: AssistantPromptResult;
+  history: AssistantHistoryItem[];
 }
 
 interface EditVisualReference {
@@ -583,6 +599,51 @@ export function App() {
     }
   }, []);
 
+  const generateAssistantPrompt = useCallback(
+    async (input: AssistantPromptInput): Promise<AssistantGenerateResponse> => {
+      if (!hasExtensionRuntime()) {
+        throw new Error("Extension runtime is unavailable in local preview.");
+      }
+
+      return sendRuntimeMessage<AssistantGenerateResponse>({
+        type: "panel:generate-assistant-prompt",
+        input
+      });
+    },
+    []
+  );
+
+  const getAssistantPromptHistory = useCallback(async () => {
+    if (!hasExtensionRuntime()) {
+      return [] satisfies AssistantHistoryItem[];
+    }
+
+    return sendRuntimeMessage<AssistantHistoryItem[]>({
+      type: "panel:get-assistant-history"
+    });
+  }, []);
+
+  const removeAssistantPromptHistory = useCallback(async (id: string) => {
+    if (!hasExtensionRuntime()) {
+      return [] satisfies AssistantHistoryItem[];
+    }
+
+    return sendRuntimeMessage<AssistantHistoryItem[]>({
+      type: "panel:remove-assistant-history",
+      id
+    });
+  }, []);
+
+  const clearAssistantPromptHistory = useCallback(async () => {
+    if (!hasExtensionRuntime()) {
+      return;
+    }
+
+    await sendRuntimeMessage<AssistantHistoryItem[]>({
+      type: "panel:clear-assistant-history"
+    });
+  }, []);
+
   const changeTemplate = useCallback(async (templateId: string) => {
     setSettings((current) =>
       current ? { ...current, selectedPromptTemplateId: templateId } : current
@@ -628,38 +689,51 @@ export function App() {
           <span className="version-pill">v0.3 专业工作台</span>
         </div>
         <nav className="icon-tabs" aria-label="面板切换">
-          <button
-            className={viewMode === "workspace" ? "active" : ""}
-            title="工作区"
-            type="button"
-            onClick={() => setViewMode("workspace")}
-          >
-            <Sparkles size={18} />
-          </button>
-          <button
-            className={viewMode === "history" ? "active" : ""}
-            title="历史记录"
-            type="button"
-            onClick={() => setViewMode("history")}
-          >
-            <History size={18} />
-          </button>
-          <button
-            className={viewMode === "templates" ? "active" : ""}
-            title="模板"
-            type="button"
-            onClick={() => setViewMode("templates")}
-          >
-            <BookOpen size={18} />
-          </button>
-          <button
-            className={viewMode === "settings" ? "active" : ""}
-            title="设置"
-            type="button"
-            onClick={() => setViewMode("settings")}
-          >
-            <Settings size={18} />
-          </button>
+          <Tooltip content="图片反推工作区" side="bottom">
+            <button
+              className={viewMode === "workspace" ? "active" : ""}
+              type="button"
+              onClick={() => setViewMode("workspace")}
+            >
+              <Sparkles size={18} />
+            </button>
+          </Tooltip>
+          <Tooltip content="Nano Banana Pro 提示词助手" side="bottom">
+            <button
+              className={viewMode === "assistant" ? "active" : ""}
+              type="button"
+              onClick={() => setViewMode("assistant")}
+            >
+              <MessageSquareText size={18} />
+            </button>
+          </Tooltip>
+          <Tooltip content="查看和恢复历史提示词" side="bottom">
+            <button
+              className={viewMode === "history" ? "active" : ""}
+              type="button"
+              onClick={() => setViewMode("history")}
+            >
+              <History size={18} />
+            </button>
+          </Tooltip>
+          <Tooltip content="管理反推模板" side="bottom">
+            <button
+              className={viewMode === "templates" ? "active" : ""}
+              type="button"
+              onClick={() => setViewMode("templates")}
+            >
+              <BookOpen size={18} />
+            </button>
+          </Tooltip>
+          <Tooltip content="配置 API 网关和模型" side="bottom">
+            <button
+              className={viewMode === "settings" ? "active" : ""}
+              type="button"
+              onClick={() => setViewMode("settings")}
+            >
+              <Settings size={18} />
+            </button>
+          </Tooltip>
         </nav>
       </header>
 
@@ -691,8 +765,6 @@ export function App() {
                   </button>
                 )}
               </section>
-
-              {task?.timings?.length ? <TimingBreakdown task={task} /> : null}
 
               <section className="template-strip">
                 <div>
@@ -746,6 +818,10 @@ export function App() {
                 source={previewContext.source}
                 preparedImage={previewContext.preparedImage}
                 mixImages={mixImages}
+                isLoading={isBusy && task?.kind === "analyze"}
+                progressPercent={task?.progressPercent}
+                progressLabel={task?.progressLabel}
+                progressDetail={task?.progressDetail ?? statusText}
                 onAnalyze={(image) =>
                   sendRuntimeMessage({ type: "panel:analyze-image", image })
                 }
@@ -758,24 +834,28 @@ export function App() {
 
             <div className="workspace-column workspace-output-column">
               <div className="result-tabs" role="tablist" aria-label="结果视图">
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={resultView === "prompt"}
-                  className={resultView === "prompt" ? "active" : ""}
-                  onClick={() => setResultView("prompt")}
-                >
-                  Prompt
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={resultView === "json"}
-                  className={resultView === "json" ? "active" : ""}
-                  onClick={() => setResultView("json")}
-                >
-                  JSON
-                </button>
+                <Tooltip content="查看可直接复制使用的提示词">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={resultView === "prompt"}
+                    className={resultView === "prompt" ? "active" : ""}
+                    onClick={() => setResultView("prompt")}
+                  >
+                    Prompt
+                  </button>
+                </Tooltip>
+                <Tooltip content="查看和手动编辑结构化 JSON">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={resultView === "json"}
+                    className={resultView === "json" ? "active" : ""}
+                    onClick={() => setResultView("json")}
+                  >
+                    JSON
+                  </button>
+                </Tooltip>
               </div>
 
               {resultView === "prompt" ? (
@@ -797,6 +877,8 @@ export function App() {
             </div>
           </div>
 
+          {task?.timings?.length ? <TimingBreakdown task={task} /> : null}
+
           <InstructionInput
             disabled={isBusy}
             mode={editMode}
@@ -806,6 +888,17 @@ export function App() {
             onSubmit={handleInstructionSubmit}
           />
         </main>
+      )}
+
+      {viewMode === "assistant" && (
+        <NanoBananaAssistant
+          mixImages={mixImages}
+          disabled={isBusy}
+          onGenerate={generateAssistantPrompt}
+          onGetHistory={getAssistantPromptHistory}
+          onRemoveHistory={removeAssistantPromptHistory}
+          onClearHistory={clearAssistantPromptHistory}
+        />
       )}
 
       {viewMode === "history" && (
@@ -849,36 +942,53 @@ function collectVisualReferences(
 }
 
 function TimingBreakdown({ task }: { task: TaskState }) {
+  const [isExpanded, setIsExpanded] = useState(false);
   const timings = task.timings ?? [];
   const totalDuration = getTaskWallClockDuration(task);
-  const slowest = timings.reduce<TaskTimingEntry | null>(
+  const slowest = timings.reduce<TaskTimingEntry>(
     (current, timing) =>
       !current || timing.durationMs > current.durationMs ? timing : current,
-    null
+    {
+      id: "timing_empty",
+      label: "暂无",
+      durationMs: 0,
+      startedAt: task.createdAt,
+      endedAt: task.updatedAt,
+      status: "done"
+    }
   );
 
   return (
-    <section className="timing-panel">
-      <div className="timing-header">
-        <strong>
-          <Timer size={14} />
-          耗时诊断
-        </strong>
-        <span>{formatDuration(totalDuration)}</span>
-      </div>
-      {slowest && (
-        <p>
-          最慢：{slowest.label} {formatDuration(slowest.durationMs)}
-        </p>
+    <section className="timing-panel compact" data-expanded={isExpanded}>
+      <Tooltip content="查看每个处理步骤的耗时">
+        <button
+          className="timing-summary-button"
+          type="button"
+          aria-expanded={isExpanded}
+          onClick={() => setIsExpanded((current) => !current)}
+        >
+          <strong>
+            <Timer size={14} />
+            耗时诊断
+          </strong>
+          <span>{formatDuration(totalDuration)}</span>
+          {slowest && (
+            <small>
+              最慢：{slowest.label} {formatDuration(slowest.durationMs)}
+            </small>
+          )}
+        </button>
+      </Tooltip>
+      {isExpanded && (
+        <div className="timing-list">
+          {timings.map((timing) => (
+            <div className="timing-row" data-status={timing.status} key={timing.id}>
+              <span>{timing.label}</span>
+              <strong>{formatDuration(timing.durationMs)}</strong>
+            </div>
+          ))}
+        </div>
       )}
-      <div className="timing-list">
-        {timings.map((timing) => (
-          <div className="timing-row" data-status={timing.status} key={timing.id}>
-            <span>{timing.label}</span>
-            <strong>{formatDuration(timing.durationMs)}</strong>
-          </div>
-        ))}
-      </div>
     </section>
   );
 }

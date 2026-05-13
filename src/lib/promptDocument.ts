@@ -79,6 +79,26 @@ const FIELD_KEYS: PromptFieldKey[] = [
   "quality"
 ];
 
+const TEMPLATE_PROMPT_TEXT_KEYS = new Set([
+  "完整提示词",
+  "完整中文提示词",
+  "提示词",
+  "正向提示词",
+  "生成提示词",
+  "生图提示词",
+  "可直接使用的中文提示词",
+  "可直接使用的提示词",
+  "可复刻提示词",
+  "可复制提示词",
+  "中文提示词",
+  "自然语言提示词",
+  "prompt_text",
+  "raw_prompt_text",
+  "complete_prompt",
+  "positive_prompt",
+  "prompt"
+]);
+
 const FIELD_ALIASES: Record<string, PromptFieldKey> = {
   subject: "subject",
   主体: "subject",
@@ -198,13 +218,18 @@ export function normalizePromptDocument(
   };
 
   if (document.template_output !== undefined) {
-    const templatePromptText = createTemplateOutputPromptText(
-      document.template_output,
-      document.template?.name
+    const templatePromptText = extractNaturalPromptFromTemplateOutput(
+      document.template_output
     );
 
     if (templatePromptText) {
       document.raw_prompt_text = templatePromptText;
+    } else if (!document.raw_prompt_text.trim()) {
+      const fallbackPromptText = flattenTemplateOutputAsPrompt(document.template_output);
+
+      if (fallbackPromptText) {
+        document.raw_prompt_text = fallbackPromptText;
+      }
     }
   }
 
@@ -217,12 +242,22 @@ export function normalizePromptDocument(
 
 export function createPromptPreviewText(document: PromptDocument): string {
   if (document.template_output !== undefined) {
-    const templatePromptText = createTemplateOutputPromptText(
+    const templatePromptText = extractNaturalPromptFromTemplateOutput(
       document.template_output
     );
 
     if (templatePromptText) {
       return templatePromptText;
+    }
+
+    if (document.raw_prompt_text.trim()) {
+      return document.raw_prompt_text;
+    }
+
+    const fallbackPromptText = flattenTemplateOutputAsPrompt(document.template_output);
+
+    if (fallbackPromptText) {
+      return fallbackPromptText;
     }
   }
 
@@ -257,10 +292,11 @@ export function updatePromptDocumentFromStructuredJsonText(
     return normalizePromptDocument(parsed);
   }
 
+  const promptText = extractNaturalPromptFromTemplateOutput(parsed);
   const nextDocument = normalizePromptDocument({
     ...document,
     template_output: parsed,
-    raw_prompt_text: createTemplateOutputPromptText(parsed),
+    raw_prompt_text: promptText ?? document.raw_prompt_text,
     negative_prompt: extractNegativePromptFromTemplateOutput(parsed) ?? document.negative_prompt
   });
 
@@ -269,7 +305,7 @@ export function updatePromptDocumentFromStructuredJsonText(
 
 function createStructuredJsonValue(document: PromptDocument): unknown {
   if (document.template_output !== undefined) {
-    return document.template_output;
+    return removeDuplicateTemplatePromptText(document.template_output);
   }
 
   return {
@@ -460,27 +496,7 @@ function extractNaturalPromptFromTemplateOutput(value: unknown): string | null {
     return null;
   }
 
-  const preferredKeys = [
-    "完整提示词",
-    "完整中文提示词",
-    "提示词",
-    "正向提示词",
-    "生成提示词",
-    "生图提示词",
-    "可直接使用的中文提示词",
-    "可直接使用的提示词",
-    "可复刻提示词",
-    "可复制提示词",
-    "中文提示词",
-    "自然语言提示词",
-    "prompt_text",
-    "raw_prompt_text",
-    "complete_prompt",
-    "positive_prompt",
-    "prompt"
-  ];
-
-  for (const key of preferredKeys) {
+  for (const key of TEMPLATE_PROMPT_TEXT_KEYS) {
     const candidate = value[key];
 
     if (typeof candidate === "string") {
@@ -497,6 +513,10 @@ function extractNaturalPromptFromTemplateOutput(value: unknown): string | null {
       continue;
     }
 
+    if (!Array.isArray(nestedValue) && !isRecord(nestedValue)) {
+      continue;
+    }
+
     const extracted = extractNaturalPromptFromTemplateOutput(nestedValue);
 
     if (extracted) {
@@ -505,6 +525,32 @@ function extractNaturalPromptFromTemplateOutput(value: unknown): string | null {
   }
 
   return null;
+}
+
+function removeDuplicateTemplatePromptText(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => removeDuplicateTemplatePromptText(item));
+  }
+
+  if (!isRecord(value)) {
+    return value;
+  }
+
+  const output: Record<string, unknown> = {};
+
+  for (const [key, nestedValue] of Object.entries(value)) {
+    if (typeof nestedValue === "string" && isTemplatePromptTextKey(key)) {
+      continue;
+    }
+
+    output[key] = removeDuplicateTemplatePromptText(nestedValue);
+  }
+
+  return output;
+}
+
+function isTemplatePromptTextKey(key: string): boolean {
+  return TEMPLATE_PROMPT_TEXT_KEYS.has(key.trim().toLowerCase());
 }
 
 function extractNegativePromptFromTemplateOutput(value: unknown): string | null {

@@ -6,11 +6,13 @@ import {
   Images,
   Layers,
   ListChecks,
+  Loader2,
   RefreshCw,
   Trash2,
   Upload,
   X
 } from "lucide-react";
+import { Tooltip } from "./Tooltip";
 
 interface CapturedImage {
   url: string;
@@ -34,6 +36,10 @@ interface ImagePreviewProps {
   source?: CapturedImage;
   preparedImage?: PreparedImagePayload;
   mixImages: CapturedImage[];
+  isLoading?: boolean;
+  progressPercent?: number;
+  progressLabel?: string;
+  progressDetail?: string;
   onAnalyze: (image: CapturedImage) => void | Promise<unknown>;
   onAnalyzeMulti: (mode: "style_common" | "batch") => void | Promise<unknown>;
   onAddMixImages: (images: CapturedImage[]) => void | Promise<unknown>;
@@ -54,6 +60,10 @@ export function ImagePreview({
   source,
   preparedImage,
   mixImages,
+  isLoading = false,
+  progressPercent,
+  progressLabel,
+  progressDetail,
   onAnalyze,
   onAnalyzeMulti,
   onAddMixImages,
@@ -237,22 +247,21 @@ export function ImagePreview({
         </div>
         <div className="button-row compact">
           {source && (
+            <Tooltip content="重新分析当前参考图">
+              <button type="button" onClick={() => onAnalyze(source)}>
+                <RefreshCw size={16} />
+              </button>
+            </Tooltip>
+          )}
+          <Tooltip content="上传一张图片并立即反推提示词">
             <button
               type="button"
-              title="重新分析"
-              onClick={() => onAnalyze(source)}
+              onClick={() => fileInputRef.current?.click()}
+              disabled={isReading}
             >
-              <RefreshCw size={16} />
+              <Upload size={16} />
             </button>
-          )}
-          <button
-            type="button"
-            title="上传图片"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={isReading}
-          >
-            <Upload size={16} />
-          </button>
+          </Tooltip>
         </div>
       </div>
 
@@ -278,6 +287,19 @@ export function ImagePreview({
             <ImagePlus size={28} />
             <span>上传图片或粘贴截图</span>
           </button>
+        )}
+        {isLoading && (
+          <div className="image-loading-overlay">
+            <div className="image-loading-card">
+              <Loader2 className="spin" size={22} />
+              <strong>{progressLabel || "正在反推"}</strong>
+              <span>{progressDetail || "正在处理图片并调用模型"}</span>
+              <div className="image-loading-progress">
+                <div style={{ width: `${normalizeProgress(progressPercent)}%` }} />
+              </div>
+              <b>{normalizeProgress(progressPercent)}%</b>
+            </div>
+          </div>
         )}
       </div>
 
@@ -319,51 +341,57 @@ export function ImagePreview({
             </span>
           </div>
           <div className="button-row compact mix-actions">
-            <button
-              className="mix-add-action"
-              type="button"
-              title="多选图片"
-              onClick={() => mixFileInputRef.current?.click()}
-              disabled={isReading}
-            >
-              <Images size={16} />
-              <span>多选</span>
-            </button>
-            <button
-              className="mix-folder-action"
-              type="button"
-              title="导入文件夹"
-              onClick={() => mixFolderInputRef.current?.click()}
-              disabled={isReading}
-            >
-              <FolderOpen size={16} />
-              <span>文件夹</span>
-            </button>
-            {mixImages.length > 0 && (
-              <button type="button" title="清空多图参考" onClick={onClearMixImages}>
-                <Trash2 size={16} />
+            <Tooltip content="一次选择多张图片加入参考队列">
+              <button
+                className="mix-add-action"
+                type="button"
+                onClick={() => mixFileInputRef.current?.click()}
+                disabled={isReading}
+              >
+                <Images size={16} />
+                <span>多选</span>
               </button>
+            </Tooltip>
+            <Tooltip content="按文件名顺序导入文件夹内的图片">
+              <button
+                className="mix-folder-action"
+                type="button"
+                onClick={() => mixFolderInputRef.current?.click()}
+                disabled={isReading}
+              >
+                <FolderOpen size={16} />
+                <span>文件夹</span>
+              </button>
+            </Tooltip>
+            {mixImages.length > 0 && (
+              <Tooltip content="清空当前多图参考队列">
+                <button type="button" onClick={onClearMixImages}>
+                  <Trash2 size={16} />
+                </button>
+              </Tooltip>
             )}
-            <button
-              className="mix-primary-action"
-              type="button"
-              title="同风格分析"
-              onClick={() => onAnalyzeMulti("style_common")}
-              disabled={mixImages.length < 2 || isReading}
-            >
-              <Layers size={16} />
-              <span>同风格</span>
-            </button>
-            <button
-              className="mix-batch-action"
-              type="button"
-              title="批量分析"
-              onClick={() => onAnalyzeMulti("batch")}
-              disabled={mixImages.length < 2 || isReading}
-            >
-              <ListChecks size={16} />
-              <span>批量</span>
-            </button>
+            <Tooltip content="提取多张图共享的视觉风格，不混合主体和场景">
+              <button
+                className="mix-primary-action"
+                type="button"
+                onClick={() => onAnalyzeMulti("style_common")}
+                disabled={mixImages.length < 2 || isReading}
+              >
+                <Layers size={16} />
+                <span>同风格</span>
+              </button>
+            </Tooltip>
+            <Tooltip content="逐张反推并分别保存到历史记录">
+              <button
+                className="mix-batch-action"
+                type="button"
+                onClick={() => onAnalyzeMulti("batch")}
+                disabled={mixImages.length < 2 || isReading}
+              >
+                <ListChecks size={16} />
+                <span>批量</span>
+              </button>
+            </Tooltip>
           </div>
         </div>
 
@@ -374,13 +402,11 @@ export function ImagePreview({
                 <img src={image.url} alt={`多图参考图 ${index + 1}`} />
                 <span className="mix-image-index">{index + 1}</span>
                 <span className="mix-image-label">@图片{index + 1}</span>
-                <button
-                  type="button"
-                  title="移除"
-                  onClick={() => onRemoveMixImage(image.url)}
-                >
-                  <X size={14} />
-                </button>
+                <Tooltip content={`移除图片 ${index + 1}`}>
+                  <button type="button" onClick={() => onRemoveMixImage(image.url)}>
+                    <X size={14} />
+                  </button>
+                </Tooltip>
               </div>
             ))}
           </div>
@@ -525,4 +551,12 @@ function formatBytes(bytes: number): string {
   }
 
   return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+
+function normalizeProgress(value: number | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return 8;
+  }
+
+  return Math.max(0, Math.min(100, Math.round(value)));
 }

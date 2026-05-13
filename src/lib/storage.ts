@@ -13,12 +13,18 @@ import {
   type CustomPromptTemplateInput,
   type PromptTemplate
 } from "./promptTemplates";
+import type {
+  AssistantPromptInput,
+  AssistantPromptResult
+} from "./openaiClient";
 
 const SETTINGS_KEY = "settings";
 const PRIVACY_CONSENT_KEY = "privacyConsent";
 const HISTORY_KEY = "promptHistory";
+const ASSISTANT_HISTORY_KEY = "assistantHistory";
 const CUSTOM_PROMPT_TEMPLATES_KEY = "customPromptTemplates";
 const MAX_HISTORY_ITEMS = 20;
+const MAX_ASSISTANT_HISTORY_ITEMS = 20;
 const MAX_HISTORY_REFERENCE_IMAGES = 6;
 const MAX_HISTORY_INLINE_IMAGE_BYTES = 120_000;
 
@@ -59,6 +65,21 @@ export interface PromptHistoryItem {
   summarySubtitle: string;
   rawPromptText: string;
   document: PromptDocument;
+}
+
+export type StoredAssistantPromptInput = Omit<
+  AssistantPromptInput,
+  "signal" | "onProgress"
+>;
+
+export interface AssistantHistoryItem {
+  id: string;
+  createdAt: string;
+  summaryTitle: string;
+  summarySubtitle: string;
+  input: StoredAssistantPromptInput;
+  result: AssistantPromptResult;
+  referenceImages?: HistoryReferenceImage[];
 }
 
 export interface HistoryReferenceImage {
@@ -227,6 +248,64 @@ export async function removeHistoryItem(id: string): Promise<PromptHistoryItem[]
 
 export async function clearHistory(): Promise<void> {
   await storageSet({ [HISTORY_KEY]: [] });
+}
+
+export async function getAssistantHistory(): Promise<AssistantHistoryItem[]> {
+  const stored = await storageGet<{ [ASSISTANT_HISTORY_KEY]?: unknown[] }>(
+    ASSISTANT_HISTORY_KEY
+  );
+  const history = stored[ASSISTANT_HISTORY_KEY] ?? [];
+  const normalizedHistory = history
+    .filter(isAssistantHistoryItem)
+    .slice(0, MAX_ASSISTANT_HISTORY_ITEMS)
+    .map(normalizeAssistantHistoryItem);
+
+  if (
+    history.length !== normalizedHistory.length ||
+    containsInlineImageDataUrl(history)
+  ) {
+    await storageSet({ [ASSISTANT_HISTORY_KEY]: normalizedHistory });
+  }
+
+  return normalizedHistory;
+}
+
+export async function addAssistantHistoryItem(input: {
+  input: StoredAssistantPromptInput;
+  result: AssistantPromptResult;
+  referenceImages?: HistoryReferenceImage[];
+}): Promise<AssistantHistoryItem[]> {
+  const existing = await getAssistantHistory();
+  const referenceImages = normalizeHistoryReferenceImages(input.referenceImages ?? []);
+  const normalizedInput = normalizeStoredAssistantInput(input.input, referenceImages);
+  const result = normalizeStoredAssistantResult(input.result);
+  const summary = createAssistantHistorySummary(normalizedInput, result);
+  const item: AssistantHistoryItem = {
+    id: createHistoryId(),
+    createdAt: new Date().toISOString(),
+    summaryTitle: summary.title,
+    summarySubtitle: summary.subtitle,
+    input: normalizedInput,
+    result,
+    referenceImages
+  };
+
+  const next = [item, ...existing].slice(0, MAX_ASSISTANT_HISTORY_ITEMS);
+  await storageSet({ [ASSISTANT_HISTORY_KEY]: next });
+  return next;
+}
+
+export async function removeAssistantHistoryItem(
+  id: string
+): Promise<AssistantHistoryItem[]> {
+  const existing = await getAssistantHistory();
+  const next = existing.filter((item) => item.id !== id);
+  await storageSet({ [ASSISTANT_HISTORY_KEY]: next });
+  return next;
+}
+
+export async function clearAssistantHistory(): Promise<void> {
+  await storageSet({ [ASSISTANT_HISTORY_KEY]: [] });
 }
 
 export async function getPromptTemplates(): Promise<PromptTemplate[]> {
@@ -401,6 +480,187 @@ function normalizeHistoryItem(item: PromptHistoryItem): PromptHistoryItem {
     rawPromptText: document.raw_prompt_text || buildRawPromptText(document),
     document
   };
+}
+
+function isAssistantHistoryItem(value: unknown): value is AssistantHistoryItem {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return (
+    typeof value.id === "string" &&
+    typeof value.createdAt === "string" &&
+    isRecord(value.input) &&
+    isRecord(value.result)
+  );
+}
+
+function normalizeAssistantHistoryItem(
+  item: AssistantHistoryItem
+): AssistantHistoryItem {
+  const referenceImages = normalizeHistoryReferenceImages(item.referenceImages ?? []);
+  const input = normalizeStoredAssistantInput(item.input, referenceImages);
+  const result = normalizeStoredAssistantResult(item.result);
+  const summary = createAssistantHistorySummary(input, result);
+
+  return {
+    ...item,
+    summaryTitle: item.summaryTitle || summary.title,
+    summarySubtitle: item.summarySubtitle || summary.subtitle,
+    input,
+    result,
+    referenceImages
+  };
+}
+
+function normalizeStoredAssistantInput(
+  input: unknown,
+  referenceImages: HistoryReferenceImage[]
+): StoredAssistantPromptInput {
+  const record = isRecord(input) ? input : {};
+  const references = Array.isArray(record.references) ? record.references : [];
+
+  return {
+    mode: readAssistantMode(record.mode),
+    idea: readString(record.idea, ""),
+    references: references
+      .filter(isRecord)
+      .slice(0, MAX_HISTORY_REFERENCE_IMAGES)
+      .map((reference, index) => {
+        const fallback = referenceImages[index];
+        const imageUrl =
+          sanitizeHistoryImageReference(readOptionalString(reference.imageUrl)) ??
+          fallback?.thumbnail ??
+          fallback?.url;
+        const sourceImageUrl =
+          sanitizeStoredSourceReference(readOptionalString(reference.sourceImageUrl)) ??
+          fallback?.sourceImageUrl;
+
+        return {
+          role: readAssistantReferenceRole(reference.role),
+          label:
+            readOptionalString(reference.label) ??
+            fallback?.id ??
+            `Image ${index + 1}`,
+          imageUrl,
+          sourceImageUrl,
+          sourcePageUrl:
+            readOptionalString(reference.sourcePageUrl) ?? fallback?.sourcePageUrl,
+          sourceTitle:
+            readOptionalString(reference.sourceTitle) ?? fallback?.sourceTitle
+        };
+      }),
+    aspectRatio: readAssistantAspectRatio(record.aspectRatio),
+    resolution: readAssistantResolution(record.resolution),
+    identityLock: Boolean(record.identityLock),
+    extraSpecs: readOptionalString(record.extraSpecs)
+  };
+}
+
+function normalizeStoredAssistantResult(value: unknown): AssistantPromptResult {
+  const record = isRecord(value) ? value : {};
+
+  return {
+    brief: readString(record.brief, ""),
+    finalPrompt: readString(record.finalPrompt, ""),
+    questions: readOptionalStringArray(record.questions),
+    assumptions: readOptionalStringArray(record.assumptions),
+    negativeConstraints: readOptionalStringArray(
+      record.negativeConstraints ?? record.negative_constraints
+    )
+  };
+}
+
+function createAssistantHistorySummary(
+  input: StoredAssistantPromptInput,
+  result: AssistantPromptResult
+): { title: string; subtitle: string } {
+  const title = truncateText(
+    result.brief || input.idea || "Nano Banana Pro 提示词",
+    42
+  );
+  const referenceCount = input.references.length;
+  const modeLabel = input.mode === "editing" ? "改图" : "生图";
+  const subtitle = `${modeLabel} · ${input.aspectRatio} · ${input.resolution}${
+    referenceCount ? ` · ${referenceCount} 图` : ""
+  }`;
+
+  return { title, subtitle };
+}
+
+function readAssistantMode(value: unknown): StoredAssistantPromptInput["mode"] {
+  return isOneOf(value, ["auto", "text-to-image", "image-and-text", "editing"])
+    ? value
+    : "auto";
+}
+
+function readAssistantReferenceRole(
+  value: unknown
+): StoredAssistantPromptInput["references"][number]["role"] {
+  return isOneOf(value, [
+    "identity",
+    "style",
+    "composition",
+    "scene",
+    "product",
+    "text",
+    "material"
+  ])
+    ? value
+    : "style";
+}
+
+function readAssistantAspectRatio(
+  value: unknown
+): StoredAssistantPromptInput["aspectRatio"] {
+  return isOneOf(value, [
+    "1:1",
+    "2:3",
+    "3:2",
+    "3:4",
+    "4:3",
+    "4:5",
+    "5:4",
+    "9:16",
+    "16:9",
+    "21:9"
+  ])
+    ? value
+    : "16:9";
+}
+
+function readAssistantResolution(
+  value: unknown
+): StoredAssistantPromptInput["resolution"] {
+  return isOneOf(value, ["1K", "2K", "4K"]) ? value : "2K";
+}
+
+function readOptionalStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function truncateText(value: string, maxLength: number): string {
+  const trimmed = value.replace(/\s+/g, " ").trim();
+
+  if (trimmed.length <= maxLength) {
+    return trimmed;
+  }
+
+  return `${trimmed.slice(0, maxLength - 1)}…`;
+}
+
+function isOneOf<const T extends readonly string[]>(
+  value: unknown,
+  allowed: T
+): value is T[number] {
+  return typeof value === "string" && allowed.includes(value);
 }
 
 function createReferenceImagesFromDocument(

@@ -82,6 +82,64 @@ export interface PromptDocumentResult {
   usedJsonMode: boolean;
 }
 
+export type AssistantPromptMode =
+  | "auto"
+  | "text-to-image"
+  | "image-and-text"
+  | "editing";
+
+export type AssistantReferenceRole =
+  | "identity"
+  | "style"
+  | "composition"
+  | "scene"
+  | "product"
+  | "text"
+  | "material";
+
+export type AssistantAspectRatio =
+  | "1:1"
+  | "2:3"
+  | "3:2"
+  | "3:4"
+  | "4:3"
+  | "4:5"
+  | "5:4"
+  | "9:16"
+  | "16:9"
+  | "21:9";
+
+export type AssistantResolution = "1K" | "2K" | "4K";
+
+export interface AssistantPromptReference {
+  imageUrl?: string;
+  sourceImageUrl?: string;
+  sourcePageUrl?: string;
+  sourceTitle?: string;
+  label?: string;
+  role: AssistantReferenceRole;
+}
+
+export interface AssistantPromptInput {
+  mode: AssistantPromptMode;
+  idea: string;
+  references: AssistantPromptReference[];
+  aspectRatio: AssistantAspectRatio;
+  resolution: AssistantResolution;
+  identityLock: boolean;
+  extraSpecs?: string;
+  signal?: AbortSignal;
+  onProgress?: (event: ApiProgressEvent) => void;
+}
+
+export interface AssistantPromptResult {
+  brief: string;
+  finalPrompt: string;
+  questions: string[];
+  assumptions: string[];
+  negativeConstraints: string[];
+}
+
 type ChatRole = "system" | "user" | "assistant";
 
 interface TextContentPart {
@@ -143,6 +201,20 @@ const EDIT_SYSTEM_PROMPT = [
   "必须保留原 JSON 的整体结构和未被要求修改的字段。",
   "必须同步更新 raw_prompt_text，使其反映修改后的完整提示词。",
   "必须只返回一个合法 JSON 对象，不要返回 Markdown、解释文字或代码块。"
+].join("\n");
+
+const NANO_BANANA_ASSISTANT_SYSTEM_PROMPT = [
+  "You are a senior prompt director for Gemini 3 Pro Image, also known as Nano Banana Pro.",
+  "Turn the user's Chinese or mixed-language idea into a complete professional English prompt.",
+  "Write natural-language creative direction, not a tag pile.",
+  "The final prompt must explicitly cover subject, action, location, style, composition, camera or lens, focus, lighting, color grading, materials, textures, mood, reference-image roles, text rendering when relevant, aspect ratio, and resolution.",
+  "If the user asks for edits, write precise editing instructions: what changes, what stays locked, and what must not be redrawn.",
+  "If references are provided, name them as Image 1, Image 2, etc. and state their role. Never blend identity, background, style, product, and text roles accidentally.",
+  "If identityLock is true, preserve bone structure, eye distance, jawline geometry, age, skin texture, and facial proportions. Include DO NOT beautify, DO NOT alter age, and DO NOT change facial proportions.",
+  "For charts, infographics, UI, labels, or any factual visual, do not invent facts. Say that all data and exact text must come from user-provided input.",
+  "Any visible text in the image must be quoted and include font style, position, size, and treatment.",
+  "Return only a valid JSON object with this shape: brief, finalPrompt, questions, assumptions, negativeConstraints.",
+  "brief must be short Simplified Chinese. finalPrompt must be polished English. questions, assumptions, and negativeConstraints must be arrays of short Simplified Chinese strings."
 ].join("\n");
 
 export async function analyzeImagePrompt(
@@ -314,6 +386,202 @@ export async function editPromptDocument(
   });
 }
 
+export async function generateNanoBananaAssistantPrompt(
+  config: OpenAiGatewayConfig,
+  input: AssistantPromptInput
+): Promise<AssistantPromptResult> {
+  validateConfig(config);
+
+  if (!input.idea.trim()) {
+    throw createAppError("missing_config", "Please describe what you want to create.");
+  }
+
+  input.onProgress?.({
+    phase: "analyzing",
+    message: "Calling Nano Banana Pro prompt assistant"
+  });
+
+  const messages: ChatMessage[] = [
+    {
+      role: "system",
+      content: NANO_BANANA_ASSISTANT_SYSTEM_PROMPT
+    },
+    {
+      role: "user",
+      content: createNanoBananaAssistantUserContent(input)
+    }
+  ];
+
+  return requestAssistantPromptResult(config, messages, {
+    signal: input.signal,
+    onProgress: input.onProgress
+  });
+}
+
+function createNanoBananaAssistantUserContent(
+  input: AssistantPromptInput
+): ChatContent {
+  const text = [
+    "Create a Nano Banana Pro prompt from this request.",
+    "",
+    `Mode: ${input.mode}`,
+    `Aspect ratio: ${input.aspectRatio}`,
+    `Resolution: ${input.resolution}`,
+    `Identity lock: ${input.identityLock ? "enabled" : "disabled"}`,
+    input.extraSpecs?.trim() ? `Extra specs: ${input.extraSpecs.trim()}` : "",
+    "",
+    "User idea:",
+    input.idea.trim(),
+    "",
+    input.references.length
+      ? [
+          "Reference images:",
+          ...input.references.map((reference, index) =>
+            [
+              `Image ${index + 1}`,
+              `Role: ${reference.role}`,
+              `Label: ${reference.label ?? `Image ${index + 1}`}`,
+              `Source title: ${reference.sourceTitle ?? "unknown"}`,
+              `Source URL: ${reference.sourceImageUrl ?? "unknown"}`
+            ].join("\n")
+          )
+        ].join("\n")
+      : "Reference images: none",
+    "",
+    "Return JSON only. Use finalPrompt for the English prompt that the user can copy directly into Nano Banana Pro."
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  if (!input.references.some((reference) => reference.imageUrl)) {
+    return text;
+  }
+
+  return [
+    {
+      type: "text",
+      text
+    },
+    ...input.references
+      .filter((reference) => Boolean(reference.imageUrl))
+      .map((reference) => ({
+        type: "image_url" as const,
+        image_url: {
+          url: reference.imageUrl!,
+          detail: "high" as const
+        }
+      }))
+  ];
+}
+
+async function requestAssistantPromptResult(
+  config: OpenAiGatewayConfig,
+  messages: ChatMessage[],
+  options: {
+    signal?: AbortSignal;
+    onProgress?: (event: ApiProgressEvent) => void;
+  }
+): Promise<AssistantPromptResult> {
+  const primaryBody = createRequestBody(config, messages, true);
+
+  try {
+    return await executeAssistantPromptRequest(config, primaryBody, {
+      ...options,
+      usedJsonMode: true
+    });
+  } catch (error) {
+    if (!shouldFallbackWithoutJsonMode(error)) {
+      throw error;
+    }
+
+    options.onProgress?.({
+      phase: "json_mode_fallback",
+      message: "JSON mode is not supported by this gateway or model. Retrying with prompt-only JSON constraints."
+    });
+
+    const fallbackBody = createRequestBody(config, messages, false);
+
+    return executeAssistantPromptRequest(config, fallbackBody, {
+      ...options,
+      usedJsonMode: false
+    });
+  }
+}
+
+async function executeAssistantPromptRequest(
+  config: OpenAiGatewayConfig,
+  body: ChatCompletionRequest,
+  options: {
+    signal?: AbortSignal;
+    onProgress?: (event: ApiProgressEvent) => void;
+    usedJsonMode: boolean;
+  }
+): Promise<AssistantPromptResult> {
+  const response = await fetchChatCompletion(config, body, {
+    signal: options.signal,
+    onProgress: options.onProgress,
+    phase: "analyzing"
+  });
+  const rawText = extractAssistantText(response);
+
+  options.onProgress?.({ phase: "parsing", message: "Parsing assistant JSON" });
+
+  return normalizeAssistantPromptResult(parseJsonObject(rawText));
+}
+
+function normalizeAssistantPromptResult(value: unknown): AssistantPromptResult {
+  if (!isRecord(value)) {
+    return {
+      brief: "",
+      finalPrompt: typeof value === "string" ? value : "",
+      questions: [],
+      assumptions: [],
+      negativeConstraints: []
+    };
+  }
+
+  return {
+    brief: readFirstString(value, ["brief", "chineseBrief", "summary"]),
+    finalPrompt: readFirstString(value, [
+      "finalPrompt",
+      "final_prompt",
+      "prompt",
+      "englishPrompt"
+    ]),
+    questions: readStringArray(value.questions),
+    assumptions: readStringArray(value.assumptions),
+    negativeConstraints: readStringArray(
+      value.negativeConstraints ?? value.negative_constraints
+    )
+  };
+}
+
+function readFirstString(
+  value: Record<string, unknown>,
+  keys: string[]
+): string {
+  for (const key of keys) {
+    const candidate = value[key];
+
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+
+  return "";
+}
+
+function readStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 async function requestPromptDocument(
   config: OpenAiGatewayConfig,
   messages: ChatMessage[],
@@ -448,6 +716,14 @@ function createEditUserContent(input: EditPromptInput): ChatContent {
       ? "本次编辑模式：视觉参考。请结合原图视觉信息与 JSON 内容进行修改。"
       : "本次编辑模式：文本编辑。请只根据 JSON 内容和修改指令进行概念替换。",
     referenceGuide,
+    "",
+    "【编辑边界】",
+    "请严格按用户指令中的编辑边界执行。没有被用户文字明确点名、没有被快捷意图允许修改的字段必须保持不变。",
+    "尤其不要擅自改变主体身份、光影、构图、镜头、色彩、风格、场景和材质。",
+    input.visualReferences?.length
+      ? "多图视觉参考只作为被 @图片 明确指定的角色使用，不得自动混合不同参考图的身份、场景、光影或风格。"
+      : "文本编辑不得凭空重写无关字段。",
+    "输出 JSON 必须同步更新所有相关字段，但不要重写无关字段。",
     "",
     "修改指令：",
     input.instruction

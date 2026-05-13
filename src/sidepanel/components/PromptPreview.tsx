@@ -5,6 +5,7 @@ import {
   getPromptFieldKeys,
   type PromptDocument
 } from "../../lib/promptDocument";
+import { Tooltip } from "./Tooltip";
 
 interface PromptPreviewProps {
   document: PromptDocument;
@@ -38,12 +39,16 @@ export function PromptPreview({
           <p>{document.metadata.model_suggestion || "适用于主流图像/视频生成模型"}</p>
         </div>
         <div className="button-row compact">
-          <button type="button" title="复制 Prompt" onClick={copyPrompt}>
-            {copied ? <Check size={16} /> : <Copy size={16} />}
-          </button>
-          <button type="button" title="保存到历史" onClick={onSave} disabled={isSaving}>
-            <Save size={16} />
-          </button>
+          <Tooltip content="复制当前可直接使用的 Prompt">
+            <button type="button" onClick={copyPrompt}>
+              {copied ? <Check size={16} /> : <Copy size={16} />}
+            </button>
+          </Tooltip>
+          <Tooltip content="保存当前结果到历史记录">
+            <button type="button" onClick={onSave} disabled={isSaving}>
+              <Save size={16} />
+            </button>
+          </Tooltip>
         </div>
       </div>
 

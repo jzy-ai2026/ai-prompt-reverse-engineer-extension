@@ -12,7 +12,10 @@ import {
   analyzeImageStyleCommonPrompt,
   analyzeImagePrompt,
   editPromptDocument,
-  type ApiProgressEvent
+  generateNanoBananaAssistantPrompt,
+  type ApiProgressEvent,
+  type AssistantPromptInput,
+  type AssistantPromptResult
 } from "../lib/openaiClient";
 import type { PromptDocument } from "../lib/promptDocument";
 import {
@@ -21,10 +24,15 @@ import {
 } from "../lib/promptTemplates";
 import {
   addHistoryItem,
+  addAssistantHistoryItem,
+  clearAssistantHistory,
   getPrivacyConsent,
+  getAssistantHistory,
   getSelectedPromptTemplate,
   getSettings,
+  removeAssistantHistoryItem,
   savePrivacyConsent,
+  type AssistantHistoryItem,
   type HistoryReferenceImage,
   type PromptHistoryItem
 } from "../lib/storage";
@@ -45,7 +53,7 @@ type TaskStatus =
   | "error"
   | "cancelled";
 
-type TaskKind = "analyze" | "edit";
+type TaskKind = "analyze" | "edit" | "assistant";
 type MultiAnalyzeMode = "style_common" | "batch";
 type TaskMode = "single" | MultiAnalyzeMode;
 type TaskTimingStatus = "done" | "error";
@@ -76,6 +84,9 @@ interface TaskState {
   usedJsonMode?: boolean;
   historySaved?: boolean;
   timings?: TaskTimingEntry[];
+  progressPercent?: number;
+  progressLabel?: string;
+  progressDetail?: string;
   error?: ReturnType<typeof toUserFacingError>;
 }
 
@@ -136,7 +147,16 @@ type RuntimeRequest =
       sourceTitle?: string;
       thumbnail?: string;
       referenceImages?: HistoryReferenceImage[];
-    };
+    }
+  | { type: "panel:generate-assistant-prompt"; input: AssistantPromptInput }
+  | { type: "panel:get-assistant-history" }
+  | { type: "panel:remove-assistant-history"; id: string }
+  | { type: "panel:clear-assistant-history" };
+
+interface AssistantGenerateResponse {
+  result: AssistantPromptResult;
+  history: AssistantHistoryItem[];
+}
 
 interface ContentImageResponse {
   image?: CapturedImage;
@@ -304,9 +324,105 @@ async function handleRuntimeMessage(message: RuntimeRequest): Promise<unknown> {
         referenceImages: message.referenceImages
       }) satisfies Promise<PromptHistoryItem[]>;
 
+    case "panel:generate-assistant-prompt":
+      return generateAssistantPrompt(message.input);
+
+    case "panel:get-assistant-history":
+      return getAssistantHistory();
+
+    case "panel:remove-assistant-history":
+      return removeAssistantHistoryItem(message.id);
+
+    case "panel:clear-assistant-history":
+      await clearAssistantHistory();
+      return [];
+
     default:
       throw createAppError("unknown_error", "Unsupported runtime message.");
   }
+}
+
+async function generateAssistantPrompt(
+  input: AssistantPromptInput
+): Promise<AssistantGenerateResponse> {
+  const taskId = createTaskId("assistant");
+  const controller = new AbortController();
+  const settings = await getSettings();
+
+  if (!settings.apiBaseUrl || !settings.apiKey || !settings.model) {
+    throw createAppError("missing_config", "API configuration is incomplete.");
+  }
+
+  const references = (input.references ?? []).slice(0, MAX_MIX_IMAGES);
+  let preparedReferences = references;
+  let referenceImages: HistoryReferenceImage[] = [];
+
+  if (references.some((reference) => reference.imageUrl)) {
+    const consent = await ensurePrivacyConsent(taskId);
+
+    if (!consent.granted) {
+      throw createAppError("privacy_denied", "User denied image upload.");
+    }
+
+    const preparedImages: PreparedImagePayload[] = [];
+    const historySources: CapturedImage[] = [];
+
+    preparedReferences = [];
+
+    for (const reference of references) {
+      if (!reference.imageUrl) {
+        preparedReferences.push(reference);
+        continue;
+      }
+
+      const source = {
+        url: reference.imageUrl,
+        sourcePageUrl: reference.sourcePageUrl,
+        sourceTitle: reference.sourceTitle
+      } satisfies CapturedImage;
+      const preparedImage = await prepareImageForVision(source, {
+        signal: controller.signal
+      });
+
+      historySources.push(source);
+      preparedImages.push(preparedImage);
+      preparedReferences.push({
+        ...reference,
+        imageUrl: preparedImage.imageUrl,
+        sourceImageUrl: preparedImage.sourceImageUrl
+      });
+    }
+
+    referenceImages = await createHistoryReferenceImages(
+      historySources,
+      preparedImages,
+      controller.signal
+    );
+  }
+
+  const result = await generateNanoBananaAssistantPrompt(
+    {
+      apiBaseUrl: settings.apiBaseUrl,
+      apiKey: settings.apiKey,
+      model: settings.model
+    },
+    {
+      ...input,
+      references: preparedReferences,
+      signal: controller.signal
+    }
+  );
+  const { signal: _signal, onProgress: _onProgress, ...storedInput } = {
+    ...input,
+    references: preparedReferences
+  };
+  const history = await addAssistantHistoryItem({
+    input: storedInput,
+    result,
+    referenceImages
+  });
+
+  return { result, history };
 }
 
 async function startAnalyzeTask(image: CapturedImage): Promise<TaskState> {
@@ -322,6 +438,9 @@ async function startAnalyzeTask(image: CapturedImage): Promise<TaskState> {
     status: "preparing",
     mode: "single",
     message: "正在准备图片",
+    progressPercent: 8,
+    progressLabel: "准备任务",
+    progressDetail: "正在创建图片反推任务",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     source: image
@@ -359,6 +478,9 @@ async function startAnalyzeMultiTask(
       mode === "batch"
         ? `正在准备批量分析：${images.length} 张参考图`
         : `正在准备同风格分析：${images.length} 张参考图`,
+    progressPercent: 8,
+    progressLabel: "准备任务",
+    progressDetail: mode === "batch" ? "正在创建批量反推任务" : "正在创建同风格分析任务",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     source: images[0],
@@ -382,6 +504,7 @@ async function runAnalyzeTask(
   controller: AbortController
 ): Promise<void> {
   try {
+    updateTaskProgress(taskId, 12, "读取配置", "正在读取 API 与模板设置");
     const { settings, template } = await measureTaskStep(taskId, "读取配置", async () => ({
       settings: await getSettings(),
       template: await getSelectedPromptTemplate()
@@ -391,6 +514,7 @@ async function runAnalyzeTask(
       throw createAppError("missing_config", "API configuration is incomplete.");
     }
 
+    updateTaskProgress(taskId, 20, "图片上传授权", "等待确认是否允许发送图片到模型服务");
     const consent = await measureTaskStep(taskId, "图片上传授权", () =>
       ensurePrivacyConsent(taskId)
     );
@@ -404,7 +528,10 @@ async function runAnalyzeTask(
     updateCurrentTask(taskId, {
       status: "preparing",
       phase: "prepare_image",
-      message: "正在处理图片"
+      message: "正在处理图片",
+      progressPercent: 30,
+      progressLabel: "处理图片",
+      progressDetail: "正在准备视觉模型可读取的图片"
     });
 
     const preparedImage = await measureTaskStep(taskId, "图片处理", () =>
@@ -428,7 +555,10 @@ async function runAnalyzeTask(
       preparedImage,
       status: "running",
       phase: "analyzing",
-      message: "正在调用视觉模型"
+      message: "正在调用视觉模型",
+      progressPercent: 72,
+      progressLabel: "调用模型",
+      progressDetail: "模型正在反推图像提示词"
     });
 
     const result = await measureTaskStep(taskId, "模型反推", () =>
@@ -455,6 +585,9 @@ async function runAnalyzeTask(
       status: "done",
       phase: "done",
       message: "分析完成",
+      progressPercent: 100,
+      progressLabel: "完成",
+      progressDetail: "图片反推已完成",
       document: result.document,
       rawText: result.rawText,
       usedJsonMode: result.usedJsonMode,
@@ -475,6 +608,7 @@ async function runAnalyzeStyleCommonTask(
   controller: AbortController
 ): Promise<void> {
   try {
+    updateTaskProgress(taskId, 12, "读取配置", "正在读取 API 与同风格模板");
     const { settings, template } = await measureTaskStep(taskId, "读取配置", async () => ({
       settings: await getSettings(),
       template: getBuiltInPromptTemplate("multi_style_common")
@@ -484,6 +618,7 @@ async function runAnalyzeStyleCommonTask(
       throw createAppError("missing_config", "API configuration is incomplete.");
     }
 
+    updateTaskProgress(taskId, 20, "图片上传授权", "等待确认是否允许发送多图到模型服务");
     const consent = await measureTaskStep(taskId, "图片上传授权", () =>
       ensurePrivacyConsent(taskId)
     );
@@ -506,7 +641,10 @@ async function runAnalyzeStyleCommonTask(
       updateCurrentTask(taskId, {
         status: "preparing",
         phase: "prepare_image",
-        message: `同风格分析：正在处理第 ${index + 1}/${images.length} 张参考图`
+        message: `同风格分析：正在处理第 ${index + 1}/${images.length} 张参考图`,
+        progressPercent: calculateMultiImageProgress(index, images.length, 28, 64),
+        progressLabel: "处理参考图",
+        progressDetail: `正在处理第 ${index + 1}/${images.length} 张参考图`
       });
 
       preparedImages.push(
@@ -541,7 +679,10 @@ async function runAnalyzeStyleCommonTask(
       preparedImage: preparedImages[0],
       status: "running",
       phase: "analyzing",
-      message: "正在调用视觉模型进行同风格分析"
+      message: "正在调用视觉模型进行同风格分析",
+      progressPercent: 74,
+      progressLabel: "调用模型",
+      progressDetail: "模型正在提取多图共享风格"
     });
 
     const result = await measureTaskStep(taskId, "同风格模型请求", () =>
@@ -571,6 +712,9 @@ async function runAnalyzeStyleCommonTask(
       status: "done",
       phase: "done",
       message: "同风格分析完成",
+      progressPercent: 100,
+      progressLabel: "完成",
+      progressDetail: "多图同风格分析已完成",
       document: result.document,
       rawText: result.rawText,
       usedJsonMode: result.usedJsonMode,
@@ -591,6 +735,7 @@ async function runAnalyzeBatchTask(
   controller: AbortController
 ): Promise<void> {
   try {
+    updateTaskProgress(taskId, 12, "读取配置", "正在读取 API 与批量模板");
     const { settings, selectedTemplate } = await measureTaskStep(
       taskId,
       "读取配置",
@@ -608,6 +753,7 @@ async function runAnalyzeBatchTask(
       throw createAppError("missing_config", "API configuration is incomplete.");
     }
 
+    updateTaskProgress(taskId, 20, "图片上传授权", "等待确认是否允许发送多图到模型服务");
     const consent = await measureTaskStep(taskId, "图片上传授权", () =>
       ensurePrivacyConsent(taskId)
     );
@@ -639,7 +785,10 @@ async function runAnalyzeBatchTask(
         status: "preparing",
         phase: "prepare_image",
         source: image,
-        message: `批量分析：正在处理第 ${index + 1}/${images.length} 张参考图`
+        message: `批量分析：正在处理第 ${index + 1}/${images.length} 张参考图`,
+        progressPercent: calculateMultiImageProgress(index, images.length, 24, 88),
+        progressLabel: "批量处理",
+        progressDetail: `正在处理第 ${index + 1}/${images.length} 张参考图`
       });
 
       const preparedImage = await measureTaskStep(
@@ -674,7 +823,10 @@ async function runAnalyzeBatchTask(
         preparedImages,
         status: "running",
         phase: "analyzing",
-        message: `批量分析：正在分析第 ${index + 1}/${images.length} 张参考图`
+        message: `批量分析：正在分析第 ${index + 1}/${images.length} 张参考图`,
+        progressPercent: calculateMultiImageProgress(index, images.length, 42, 94),
+        progressLabel: "批量反推",
+        progressDetail: `模型正在分析第 ${index + 1}/${images.length} 张图`
       });
 
       const result = await measureTaskStep(
@@ -731,6 +883,9 @@ async function runAnalyzeBatchTask(
       status: "done",
       phase: "done",
       message: `批量分析完成，已保存 ${images.length} 条历史记录`,
+      progressPercent: 100,
+      progressLabel: "完成",
+      progressDetail: `批量分析完成，已保存 ${images.length} 条历史记录`,
       document: lastResult.document,
       rawText: lastResult.rawText,
       usedJsonMode: lastResult.usedJsonMode,
@@ -762,6 +917,9 @@ async function startEditTask(
     status: "running",
     phase: "editing",
     message: "正在修改 PromptDocument",
+    progressPercent: 68,
+    progressLabel: "编辑提示词",
+    progressDetail: visualReferences.length ? "正在结合视觉参考修改 JSON" : "正在按文本指令修改 JSON",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     document
@@ -821,6 +979,9 @@ async function runEditTask(
       status: "done",
       phase: "done",
       message: "修改完成",
+      progressPercent: 100,
+      progressLabel: "完成",
+      progressDetail: "提示词编辑已完成",
       document: result.document,
       rawText: result.rawText,
       usedJsonMode: result.usedJsonMode
@@ -929,19 +1090,88 @@ function cancelCurrentTask(taskId?: string): void {
 }
 
 function handleImageProgress(taskId: string, event: ImagePipelineProgress): void {
+  const percentByPhase: Record<ImagePipelineProgress["phase"], number> = {
+    checking_url: 32,
+    fetching_image: 42,
+    decoding_image: 54,
+    compressing_image: 64
+  };
+  const labelByPhase: Record<ImagePipelineProgress["phase"], string> = {
+    checking_url: "检查图片",
+    fetching_image: "读取图片",
+    decoding_image: "解码图片",
+    compressing_image: "压缩图片"
+  };
+
   updateCurrentTask(taskId, {
     status: "preparing",
     phase: event.phase,
-    message: event.message
+    message: event.message,
+    progressPercent: Math.max(
+      currentTask?.progressPercent ?? 0,
+      percentByPhase[event.phase]
+    ),
+    progressLabel: labelByPhase[event.phase],
+    progressDetail: event.message
   });
 }
 
 function handleApiProgress(taskId: string, event: ApiProgressEvent): void {
+  const percentByPhase: Record<ApiProgressEvent["phase"], number> = {
+    uploading: 70,
+    analyzing: 82,
+    editing: 82,
+    parsing: 96,
+    retrying: 78,
+    json_mode_fallback: 76
+  };
+  const labelByPhase: Record<ApiProgressEvent["phase"], string> = {
+    uploading: "上传请求",
+    analyzing: "调用模型",
+    editing: "编辑提示词",
+    parsing: "解析结果",
+    retrying: "重试请求",
+    json_mode_fallback: "兼容重试"
+  };
+
   updateCurrentTask(taskId, {
     status: "running",
     phase: event.phase,
     message: event.message,
+    progressPercent: Math.max(
+      currentTask?.progressPercent ?? 0,
+      percentByPhase[event.phase]
+    ),
+    progressLabel: labelByPhase[event.phase],
+    progressDetail: event.message
   });
+}
+
+function updateTaskProgress(
+  taskId: string,
+  progressPercent: number,
+  progressLabel: string,
+  progressDetail?: string
+): void {
+  updateCurrentTask(taskId, {
+    progressPercent,
+    progressLabel,
+    progressDetail
+  });
+}
+
+function calculateMultiImageProgress(
+  index: number,
+  total: number,
+  start: number,
+  end: number
+): number {
+  if (total <= 1) {
+    return end;
+  }
+
+  const step = (end - start) / total;
+  return Math.min(end, Math.round(start + step * index));
 }
 
 async function measureTaskStep<T>(
