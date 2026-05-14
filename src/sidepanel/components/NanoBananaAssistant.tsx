@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   Copy,
+  ImagePlus,
   ImageIcon,
   Loader2,
   RefreshCw,
-  Sparkles,
   Trash2,
   WandSparkles
 } from "lucide-react";
@@ -20,6 +20,14 @@ import type {
 } from "../../lib/openaiClient";
 import type { AssistantHistoryItem } from "../../lib/storage";
 import { Tooltip } from "./Tooltip";
+import {
+  collectImageFiles,
+  createImportedImagesFromFiles,
+  getClipboardImageFiles,
+  getDataTransferImageFiles,
+  hasImageFiles,
+  MAX_REFERENCE_IMAGE_FILES
+} from "./imageFiles";
 
 interface CapturedImage {
   url: string;
@@ -40,6 +48,9 @@ interface NanoBananaAssistantProps {
   onGetHistory: () => Promise<AssistantHistoryItem[]>;
   onRemoveHistory: (id: string) => Promise<AssistantHistoryItem[]>;
   onClearHistory: () => Promise<void>;
+  onAddReferenceImages: (images: CapturedImage[]) => void | Promise<unknown>;
+  onRemoveReferenceImage: (url: string) => void | Promise<unknown>;
+  onClearReferenceImages: () => void | Promise<unknown>;
 }
 
 const ASSISTANT_MODES: Array<{
@@ -138,8 +149,12 @@ export function NanoBananaAssistant({
   onGenerate,
   onGetHistory,
   onRemoveHistory,
-  onClearHistory
+  onClearHistory,
+  onAddReferenceImages,
+  onRemoveReferenceImage,
+  onClearReferenceImages
 }: NanoBananaAssistantProps) {
+  const referenceInputRef = useRef<HTMLInputElement | null>(null);
   const [mode, setMode] = useState<AssistantPromptMode>("auto");
   const [idea, setIdea] = useState("");
   const [aspectRatio, setAspectRatio] = useState<AssistantAspectRatio>("16:9");
@@ -153,6 +168,8 @@ export function NanoBananaAssistant({
   const [history, setHistory] = useState<AssistantHistoryItem[]>([]);
   const [error, setError] = useState<UserFacingError | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isReadingReferences, setIsReadingReferences] = useState(false);
+  const [isReferenceDropActive, setIsReferenceDropActive] = useState(false);
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
@@ -161,7 +178,10 @@ export function NanoBananaAssistant({
 
   useEffect(() => {
     setReferenceRoles((current) => {
-      const next = { ...current };
+      const activeUrls = new Set(mixImages.map((image) => image.url));
+      const next = Object.fromEntries(
+        Object.entries(current).filter(([url]) => activeUrls.has(url))
+      ) as Record<string, AssistantReferenceRole>;
 
       mixImages.forEach((image, index) => {
         if (!next[image.url]) {
@@ -172,6 +192,13 @@ export function NanoBananaAssistant({
       return next;
     });
   }, [mixImages]);
+
+  const remainingReferenceSlots = Math.max(
+    0,
+    MAX_REFERENCE_IMAGE_FILES - mixImages.length
+  );
+  const canAddReferenceImages =
+    remainingReferenceSlots > 0 && !disabled && !isReadingReferences;
 
   const references = useMemo(
     () =>
@@ -246,6 +273,86 @@ export function NanoBananaAssistant({
     setHistory([]);
   }
 
+  async function addReferenceFiles(files: File[]) {
+    if (!canAddReferenceImages) {
+      return;
+    }
+
+    setIsReadingReferences(true);
+    setError(null);
+
+    try {
+      const images = await createImportedImagesFromFiles(
+        files,
+        remainingReferenceSlots
+      );
+
+      if (images.length) {
+        await onAddReferenceImages(images);
+      }
+    } catch (caught) {
+      setError(toUserFacingError(caught));
+    } finally {
+      setIsReadingReferences(false);
+    }
+  }
+
+  async function handleReferenceFileChange(
+    event: React.ChangeEvent<HTMLInputElement>
+  ) {
+    const files = collectImageFiles(event.target.files ?? []);
+
+    if (!files.length) {
+      return;
+    }
+
+    try {
+      await addReferenceFiles(files);
+    } finally {
+      event.target.value = "";
+    }
+  }
+
+  function handleReferencePaste(event: React.ClipboardEvent<HTMLElement>) {
+    const files = getClipboardImageFiles(event.clipboardData);
+
+    if (!files.length) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    void addReferenceFiles(files);
+  }
+
+  function handleReferenceDragOver(event: React.DragEvent<HTMLElement>) {
+    if (!hasImageFiles(event.dataTransfer)) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setIsReferenceDropActive(true);
+  }
+
+  function handleReferenceDragLeave(event: React.DragEvent<HTMLElement>) {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+      setIsReferenceDropActive(false);
+    }
+  }
+
+  function handleReferenceDrop(event: React.DragEvent<HTMLElement>) {
+    const files = getDataTransferImageFiles(event.dataTransfer);
+
+    if (!files.length) {
+      return;
+    }
+
+    event.preventDefault();
+    setIsReferenceDropActive(false);
+    void addReferenceFiles(files);
+  }
+
   function restoreHistoryItem(item: AssistantHistoryItem) {
     setMode(item.input.mode);
     setIdea(item.input.idea);
@@ -304,7 +411,7 @@ export function NanoBananaAssistant({
             </Tooltip>
           </div>
 
-          <details className="assistant-guide" open>
+          <details className="assistant-guide">
             <summary>使用说明</summary>
             <div className="assistant-guide-list">
               <span>纯文字出图时，直接写画面目标、风格和要出现的文字。</span>
@@ -403,49 +510,119 @@ export function NanoBananaAssistant({
 
           <div className="assistant-reference-list">
             <div className="assistant-reference-header">
-              <strong>参考图角色</strong>
-              <span>{mixImages.length} / 6</span>
+              <div>
+                <strong>参考图</strong>
+                <span>{mixImages.length} / {MAX_REFERENCE_IMAGE_FILES}</span>
+              </div>
+              <div className="assistant-reference-actions">
+                {mixImages.length > 0 && (
+                  <Tooltip content="清空当前参考图队列">
+                    <button
+                      type="button"
+                      aria-label="清空参考图"
+                      onClick={onClearReferenceImages}
+                      disabled={disabled || isReadingReferences}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </Tooltip>
+                )}
+              </div>
             </div>
 
-            {mixImages.length ? (
-              mixImages.map((image, index) => {
+            <div
+              className={
+                isReferenceDropActive
+                  ? "assistant-reference-rail is-dragging"
+                  : "assistant-reference-rail"
+              }
+              onDragOver={handleReferenceDragOver}
+              onDragLeave={handleReferenceDragLeave}
+              onDrop={handleReferenceDrop}
+              onPaste={handleReferencePaste}
+            >
+              <button
+                className="assistant-reference-add-tile"
+                type="button"
+                onClick={() => referenceInputRef.current?.click()}
+                disabled={!canAddReferenceImages}
+              >
+                {isReadingReferences ? (
+                  <Loader2 className="spin" size={15} />
+                ) : (
+                  <ImagePlus size={16} />
+                )}
+                <span>
+                  {isReadingReferences
+                    ? "读取中"
+                    : remainingReferenceSlots
+                      ? "拖入 / 粘贴 / 点击"
+                      : "已满"}
+                </span>
+              </button>
+
+              {mixImages.map((image, index) => {
                 const role =
                   referenceRoles[image.url] ?? getDefaultReferenceRole(index);
 
                 return (
-                  <div className="assistant-reference-card" key={image.url}>
+                  <article
+                    className="assistant-reference-tile"
+                    key={image.url}
+                    title={image.sourceTitle || `参考图 ${index + 1}`}
+                  >
                     <img src={image.url} alt={`参考图 ${index + 1}`} />
-                    <div>
-                      <strong>图片 {index + 1}</strong>
-                      <span>{image.sourceTitle || "参考图"}</span>
-                    </div>
-                    <Tooltip content={ROLE_HINTS[role]}>
-                      <select
-                        value={role}
-                        aria-label={`图片 ${index + 1} 的参考角色`}
-                        onChange={(event) =>
-                          setReferenceRoles((current) => ({
-                            ...current,
-                            [image.url]: event.target.value as AssistantReferenceRole
-                          }))
-                        }
+                    <span className="assistant-reference-index">{index + 1}</span>
+                    <Tooltip content={`移除图片 ${index + 1}`}>
+                      <button
+                        className="assistant-reference-remove"
+                        type="button"
+                        aria-label={`移除图片 ${index + 1}`}
+                        onClick={() => onRemoveReferenceImage(image.url)}
+                        disabled={disabled || isReadingReferences}
                       >
-                        {REFERENCE_ROLES.map((referenceRole) => (
-                          <option value={referenceRole.value} key={referenceRole.value}>
-                            {referenceRole.label}
-                          </option>
-                        ))}
-                      </select>
+                        <Trash2 size={12} />
+                      </button>
                     </Tooltip>
-                  </div>
+                    <Tooltip content={ROLE_HINTS[role]}>
+                      <label className="assistant-reference-role-pill">
+                        <span className="visually-hidden">
+                          图片 {index + 1} 的参考角色
+                        </span>
+                        <select
+                          value={role}
+                          aria-label={`图片 ${index + 1} 的参考角色`}
+                          onChange={(event) =>
+                            setReferenceRoles((current) => ({
+                              ...current,
+                              [image.url]: event.target.value as AssistantReferenceRole
+                            }))
+                          }
+                        >
+                          {REFERENCE_ROLES.map((referenceRole) => (
+                            <option
+                              value={referenceRole.value}
+                              key={referenceRole.value}
+                            >
+                              {referenceRole.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </Tooltip>
+                  </article>
                 );
-              })
-            ) : (
-              <div className="assistant-reference-empty">
-                <Sparkles size={16} />
-                <span>暂无参考图，可先在反推页的多图参考区添加</span>
-              </div>
-            )}
+              })}
+            </div>
+
+            <input
+              ref={referenceInputRef}
+              className="visually-hidden"
+              type="file"
+              accept="image/*"
+              multiple
+              onChange={handleReferenceFileChange}
+            />
           </div>
 
           {error && (

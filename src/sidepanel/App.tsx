@@ -158,6 +158,10 @@ interface PendingConsent {
 }
 
 export function App() {
+  const isFloatingSurface = useMemo(
+    () => new URLSearchParams(window.location.search).get("surface") === "floating",
+    []
+  );
   const [viewMode, setViewMode] = useState<ViewMode>("workspace");
   const [resultView, setResultView] = useState<ResultView>("prompt");
   const [task, setTask] = useState<TaskState | null>(null);
@@ -681,12 +685,15 @@ export function App() {
   }, [document, redoStack, setActiveDocument]);
 
   return (
-    <div className="app-shell">
+    <div
+      className={isFloatingSurface ? "app-shell is-floating-surface" : "app-shell"}
+      data-surface={isFloatingSurface ? "floating" : "sidepanel"}
+    >
       <header className="app-header">
         <div>
           <div className="eyebrow">Prompt Reverse Engineer</div>
           <h1>图片提示词反推</h1>
-          <span className="version-pill">v0.3 专业工作台</span>
+          <span className="version-pill">v0.4 高级极简</span>
         </div>
         <nav className="icon-tabs" aria-label="面板切换">
           <Tooltip content="图片反推工作区" side="bottom">
@@ -739,51 +746,55 @@ export function App() {
 
       {viewMode === "workspace" && (
         <main className="workspace">
-          <section className="workspace-hero" aria-label="当前工作流状态">
-            <div>
-              <span className="hero-kicker">IMAGE TO PROMPT</span>
-              <h2>把参考图整理成可控 Prompt</h2>
+          <section
+            className="workflow-strip"
+            data-status={task?.status ?? "idle"}
+            aria-label="当前工作流"
+          >
+            <div className="workflow-status">
+              {isBusy ? (
+                <Loader2 className="spin" size={16} />
+              ) : task?.status === "error" ? (
+                <AlertCircle size={16} />
+              ) : (
+                <span className="workflow-dot" aria-hidden="true" />
+              )}
+              <div>
+                <strong>{statusLabel}</strong>
+                <span>{statusText}</span>
+              </div>
+              {isBusy && (
+                <button type="button" onClick={cancelTask}>
+                  取消
+                </button>
+              )}
             </div>
-            <div className="hero-metrics" aria-label="工作流概览">
+
+            <label className="workflow-template">
+              <span>模板</span>
+              <select
+                value={settings?.selectedPromptTemplateId ?? selectedTemplate?.id ?? ""}
+                onChange={(event) => changeTemplate(event.target.value)}
+                disabled={!templates.length || isBusy}
+              >
+                {templates.map((template) => (
+                  <option value={template.id} key={template.id}>
+                    {template.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <div className="workflow-meta" aria-label="工作流概览">
               <span>
                 <ImageIcon size={14} />
                 {mixImages.length ? `${mixImages.length} 张参考` : "单图分析"}
               </span>
-              <span>{statusLabel}</span>
             </div>
           </section>
 
           <div className="workspace-grid">
             <div className="workspace-column workspace-input-column">
-              <section className="status-strip" data-status={task?.status ?? "idle"}>
-                {isBusy && <Loader2 className="spin" size={16} />}
-                {!isBusy && task?.status === "error" && <AlertCircle size={16} />}
-                <span>{statusText}</span>
-                {isBusy && (
-                  <button type="button" onClick={cancelTask}>
-                    取消
-                  </button>
-                )}
-              </section>
-
-              <section className="template-strip">
-                <div>
-                  <strong>{selectedTemplate?.name ?? "默认模板"}</strong>
-                  <span>{selectedTemplate?.description ?? "选择本次反推使用的提示词模板"}</span>
-                </div>
-                <select
-                  value={settings?.selectedPromptTemplateId ?? selectedTemplate?.id ?? ""}
-                  onChange={(event) => changeTemplate(event.target.value)}
-                  disabled={!templates.length || isBusy}
-                >
-                  {templates.map((template) => (
-                    <option value={template.id} key={template.id}>
-                      {template.name}
-                    </option>
-                  ))}
-                </select>
-              </section>
-
               {error && (
                 <section className="error-panel">
                   <strong>{error.title}</strong>
@@ -898,6 +909,9 @@ export function App() {
           onGetHistory={getAssistantPromptHistory}
           onRemoveHistory={removeAssistantPromptHistory}
           onClearHistory={clearAssistantPromptHistory}
+          onAddReferenceImages={addMixImages}
+          onRemoveReferenceImage={removeMixImage}
+          onClearReferenceImages={clearMixImages}
         />
       )}
 

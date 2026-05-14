@@ -162,6 +162,10 @@ interface ContentImageResponse {
   image?: CapturedImage;
 }
 
+interface ContentFloatingResponse {
+  ok: boolean;
+}
+
 interface ConsentDecision {
   granted: boolean;
   remember: boolean;
@@ -191,25 +195,25 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.action.onClicked.addListener((tab) => {
-  void openPanel(tab);
+  void openFloatingPanelOrSidePanel(tab, "toggle");
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === MENU_ANALYZE_IMAGE) {
     const image = createCapturedImage(info, tab);
-    void openPanel(tab).then(() => startAnalyzeTask(image));
+    void openFloatingPanelOrSidePanel(tab, "open").then(() => startAnalyzeTask(image));
     return;
   }
 
   if (info.menuItemId === MENU_ADD_TO_MIX) {
     const image = createCapturedImage(info, tab);
-    void addMixImages([image]).then(() => openPanel(tab));
+    void addMixImages([image]).then(() => openFloatingPanelOrSidePanel(tab, "open"));
   }
 });
 
 chrome.commands.onCommand.addListener((command, tab) => {
   if (command === "open-panel") {
-    void openPanel(tab);
+    void openFloatingPanelOrSidePanel(tab, "toggle");
     return;
   }
 
@@ -1321,7 +1325,7 @@ async function handleAnalyzeShortcut(tab?: chrome.tabs.Tab): Promise<void> {
     return;
   }
 
-  await openPanel(activeTab);
+  await openFloatingPanelOrSidePanel(activeTab, "open");
 
   const image = await getLastImageFromContent(activeTab);
 
@@ -1357,6 +1361,44 @@ async function getLastImageFromContent(
   }
 }
 
+async function openFloatingPanelOrSidePanel(
+  tab?: chrome.tabs.Tab,
+  mode: "open" | "toggle" = "open"
+): Promise<void> {
+  const didOpenFloatingPanel = await openFloatingPanel(tab, mode);
+
+  if (!didOpenFloatingPanel) {
+    await openPanel(tab);
+  }
+}
+
+async function openFloatingPanel(
+  tab?: chrome.tabs.Tab,
+  mode: "open" | "toggle" = "open"
+): Promise<boolean> {
+  const targetTab = tab?.id ? tab : await getActiveTab();
+
+  if (!targetTab?.id || isRestrictedUrl(targetTab.url)) {
+    return false;
+  }
+
+  try {
+    const response = await chrome.tabs.sendMessage<
+      { type: "content:open-floating-panel" | "content:toggle-floating-panel" },
+      ContentFloatingResponse
+    >(targetTab.id, {
+      type:
+        mode === "toggle"
+          ? "content:toggle-floating-panel"
+          : "content:open-floating-panel"
+    });
+
+    return response?.ok === true;
+  } catch {
+    return false;
+  }
+}
+
 async function openPanel(tab?: chrome.tabs.Tab): Promise<void> {
   if (!chrome.sidePanel?.open) {
     return;
@@ -1382,6 +1424,21 @@ async function openPanel(tab?: chrome.tabs.Tab): Promise<void> {
     // Opening the side panel is user-gesture sensitive in some builds.
     // The task still proceeds, and the panel can be opened from the toolbar.
   }
+}
+
+function isRestrictedUrl(url?: string): boolean {
+  if (!url) {
+    return false;
+  }
+
+  return (
+    url.startsWith("chrome://") ||
+    url.startsWith("edge://") ||
+    url.startsWith("about:") ||
+    url.startsWith("chrome-extension://") ||
+    url.startsWith("https://chromewebstore.google.com/") ||
+    url.startsWith("https://chrome.google.com/webstore/")
+  );
 }
 
 async function getActiveTab(): Promise<chrome.tabs.Tab | undefined> {

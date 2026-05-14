@@ -13,6 +13,13 @@ import {
   X
 } from "lucide-react";
 import { Tooltip } from "./Tooltip";
+import {
+  collectImageFiles,
+  createImportedImagesFromFiles,
+  getClipboardImageFiles,
+  getDataTransferImageFiles,
+  hasImageFiles
+} from "./imageFiles";
 
 interface CapturedImage {
   url: string;
@@ -50,7 +57,6 @@ interface ImagePreviewProps {
 type DropZone = "single" | "mix" | null;
 
 const MAX_MIX_IMAGE_FILES = 6;
-const IMAGE_FILE_EXTENSION_PATTERN = /\.(avif|bmp|gif|jpe?g|png|webp)$/i;
 const DIRECTORY_INPUT_ATTRIBUTES = {
   directory: "",
   webkitdirectory: ""
@@ -226,12 +232,7 @@ export function ImagePreview({
     setIsReadingMixFiles(true);
 
     try {
-      const images = await Promise.all(
-        files.slice(0, MAX_MIX_IMAGE_FILES).map(async (file) => ({
-          url: await readFileAsDataUrl(file),
-          sourceTitle: file.webkitRelativePath || file.name || "本地多图"
-        }))
-      );
+      const images = await createImportedImagesFromFiles(files, MAX_MIX_IMAGE_FILES);
       await onAddMixImages(images);
     } finally {
       setIsReadingMixFiles(false);
@@ -239,7 +240,7 @@ export function ImagePreview({
   }
 
   return (
-    <section className="panel-section image-preview">
+    <section className="panel-section image-preview" data-has-preview={Boolean(previewUrl)}>
       <div className="section-header">
         <div>
           <h2>参考图</h2>
@@ -285,7 +286,8 @@ export function ImagePreview({
             disabled={isReading}
           >
             <ImagePlus size={28} />
-            <span>上传图片或粘贴截图</span>
+            <strong>素材槽</strong>
+            <span>拖入图片 / 粘贴截图</span>
           </button>
         )}
         {isLoading && (
@@ -305,7 +307,7 @@ export function ImagePreview({
 
       <div className="paste-hint">
         <ClipboardPaste size={14} />
-        <span>单图支持拖拽、选择文件或粘贴截图，导入后立即分析</span>
+        <span>导入后立即分析</span>
       </div>
 
       {preparedImage && (
@@ -445,72 +447,6 @@ export function ImagePreview({
       />
     </section>
   );
-}
-
-function collectImageFiles(files: FileList | File[]): File[] {
-  return Array.from(files)
-    .filter(isImageFile)
-    .sort((left, right) =>
-      getFileSortKey(left).localeCompare(getFileSortKey(right), undefined, {
-        numeric: true,
-        sensitivity: "base"
-      })
-    );
-}
-
-function isImageFile(file: File): boolean {
-  return file.type.startsWith("image/") || IMAGE_FILE_EXTENSION_PATTERN.test(file.name);
-}
-
-function getFileSortKey(file: File): string {
-  return file.webkitRelativePath || file.name;
-}
-
-function getClipboardImageFiles(data: DataTransfer | null): File[] {
-  if (!data) {
-    return [];
-  }
-
-  const files: File[] = [];
-
-  for (const item of Array.from(data.items)) {
-    if (
-      item.kind === "file" &&
-      (item.type.startsWith("image/") || !item.type)
-    ) {
-      const file = item.getAsFile();
-
-      if (file && isImageFile(file)) {
-        files.push(file);
-      }
-    }
-  }
-
-  if (files.length) {
-    return files;
-  }
-
-  for (const file of Array.from(data.files)) {
-    if (isImageFile(file)) {
-      files.push(file);
-    }
-  }
-
-  return files;
-}
-
-function getDataTransferImageFiles(data: DataTransfer): File[] {
-  return collectImageFiles(data.files);
-}
-
-function hasImageFiles(data: DataTransfer): boolean {
-  const items = Array.from(data.items);
-
-  if (items.some((item) => item.kind === "file" && item.type.startsWith("image/"))) {
-    return true;
-  }
-
-  return Array.from(data.files).some(isImageFile);
 }
 
 function getPreviewUrl(

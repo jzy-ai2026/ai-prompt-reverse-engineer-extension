@@ -5,7 +5,7 @@
 ## 推荐下载
 
 - 最新版：`ai-prompt-reverse-engineer-extension-latest.zip`
-- 固定版本：`ai-prompt-reverse-engineer-extension-v0.3.1.zip`
+- 固定版本：`ai-prompt-reverse-engineer-extension-v0.4.0.zip`
 
 两者当前内容相同。`latest` 适合同事直接下载，固定版本适合归档。
 
