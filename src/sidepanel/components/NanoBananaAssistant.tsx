@@ -34,6 +34,7 @@ interface CapturedImage {
   sourcePageUrl?: string;
   sourceTitle?: string;
   tabId?: number;
+  referenceId?: string;
 }
 
 interface AssistantGenerateResponse {
@@ -49,7 +50,7 @@ interface NanoBananaAssistantProps {
   onRemoveHistory: (id: string) => Promise<AssistantHistoryItem[]>;
   onClearHistory: () => Promise<void>;
   onAddReferenceImages: (images: CapturedImage[]) => void | Promise<unknown>;
-  onRemoveReferenceImage: (url: string) => void | Promise<unknown>;
+  onSetReferenceImages: (images: CapturedImage[]) => void | Promise<unknown>;
   onClearReferenceImages: () => void | Promise<unknown>;
 }
 
@@ -151,7 +152,7 @@ export function NanoBananaAssistant({
   onRemoveHistory,
   onClearHistory,
   onAddReferenceImages,
-  onRemoveReferenceImage,
+  onSetReferenceImages,
   onClearReferenceImages
 }: NanoBananaAssistantProps) {
   const referenceInputRef = useRef<HTMLInputElement | null>(null);
@@ -170,6 +171,12 @@ export function NanoBananaAssistant({
   const [isLoading, setIsLoading] = useState(false);
   const [isReadingReferences, setIsReadingReferences] = useState(false);
   const [isReferenceDropActive, setIsReferenceDropActive] = useState(false);
+  const [draggedReferenceIndex, setDraggedReferenceIndex] = useState<number | null>(
+    null
+  );
+  const [dragOverReferenceIndex, setDragOverReferenceIndex] = useState<
+    number | null
+  >(null);
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
@@ -178,14 +185,18 @@ export function NanoBananaAssistant({
 
   useEffect(() => {
     setReferenceRoles((current) => {
-      const activeUrls = new Set(mixImages.map((image) => image.url));
+      const activeKeys = new Set(
+        mixImages.map((image, index) => getReferenceRoleKey(image, index))
+      );
       const next = Object.fromEntries(
-        Object.entries(current).filter(([url]) => activeUrls.has(url))
+        Object.entries(current).filter(([key]) => activeKeys.has(key))
       ) as Record<string, AssistantReferenceRole>;
 
       mixImages.forEach((image, index) => {
-        if (!next[image.url]) {
-          next[image.url] = getDefaultReferenceRole(index);
+        const roleKey = getReferenceRoleKey(image, index);
+
+        if (!next[roleKey]) {
+          next[roleKey] = getDefaultReferenceRole(index);
         }
       });
 
@@ -202,14 +213,18 @@ export function NanoBananaAssistant({
 
   const references = useMemo(
     () =>
-      mixImages.map((image, index) => ({
-        imageUrl: image.url,
-        sourceImageUrl: image.url,
-        sourcePageUrl: image.sourcePageUrl,
-        sourceTitle: image.sourceTitle,
-        label: `图片 ${index + 1}`,
-        role: referenceRoles[image.url] ?? getDefaultReferenceRole(index)
-      })),
+      mixImages.map((image, index) => {
+        const roleKey = getReferenceRoleKey(image, index);
+
+        return {
+          imageUrl: image.url,
+          sourceImageUrl: image.url,
+          sourcePageUrl: image.sourcePageUrl,
+          sourceTitle: image.sourceTitle,
+          label: `图片 ${index + 1}`,
+          role: referenceRoles[roleKey] ?? getDefaultReferenceRole(index)
+        };
+      }),
     [mixImages, referenceRoles]
   );
 
@@ -297,6 +312,71 @@ export function NanoBananaAssistant({
     }
   }
 
+  async function updateReferenceImages(images: CapturedImage[]) {
+    try {
+      setError(null);
+      await onSetReferenceImages(images.slice(0, MAX_REFERENCE_IMAGE_FILES));
+    } catch (caught) {
+      setError(toUserFacingError(caught));
+    }
+  }
+
+  async function duplicateReferenceImage(index: number) {
+    if (!canAddReferenceImages) {
+      return;
+    }
+
+    const image = mixImages[index];
+
+    if (!image) {
+      return;
+    }
+
+    const roleKey = getReferenceRoleKey(image, index);
+    const duplicate: CapturedImage = {
+      ...image,
+      referenceId: createReferenceId(),
+      sourceTitle: image.sourceTitle ? `${image.sourceTitle} 复制` : "复制参考图"
+    };
+    const duplicateRoleKey = getReferenceRoleKey(duplicate, index + 1);
+    const nextImages = [
+      ...mixImages.slice(0, index + 1),
+      duplicate,
+      ...mixImages.slice(index + 1)
+    ].slice(0, MAX_REFERENCE_IMAGE_FILES);
+
+    setReferenceRoles((current) => ({
+      ...current,
+      [duplicateRoleKey]: current[roleKey] ?? getDefaultReferenceRole(index)
+    }));
+
+    await updateReferenceImages(nextImages);
+  }
+
+  async function removeReferenceImageAt(index: number) {
+    if (disabled || isReadingReferences) {
+      return;
+    }
+
+    await updateReferenceImages(
+      mixImages.filter((_, imageIndex) => imageIndex !== index)
+    );
+  }
+
+  async function moveReferenceImage(fromIndex: number, toIndex: number) {
+    if (fromIndex === toIndex || disabled || isReadingReferences) {
+      return;
+    }
+
+    const nextImages = moveArrayItem(mixImages, fromIndex, toIndex);
+
+    if (nextImages === mixImages) {
+      return;
+    }
+
+    await updateReferenceImages(nextImages);
+  }
+
   async function handleReferenceFileChange(
     event: React.ChangeEvent<HTMLInputElement>
   ) {
@@ -353,6 +433,61 @@ export function NanoBananaAssistant({
     void addReferenceFiles(files);
   }
 
+  function handleReferenceTileDragStart(
+    event: React.DragEvent<HTMLElement>,
+    index: number
+  ) {
+    if (disabled || isReadingReferences || mixImages.length < 2) {
+      event.preventDefault();
+      return;
+    }
+
+    if (isInteractiveDragTarget(event.target)) {
+      event.preventDefault();
+      return;
+    }
+
+    setDraggedReferenceIndex(index);
+    setDragOverReferenceIndex(index);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", `reference-image:${index}`);
+  }
+
+  function handleReferenceTileDragOver(
+    event: React.DragEvent<HTMLElement>,
+    index: number
+  ) {
+    if (draggedReferenceIndex === null || disabled || isReadingReferences) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "move";
+    setDragOverReferenceIndex(index);
+  }
+
+  function handleReferenceTileDrop(
+    event: React.DragEvent<HTMLElement>,
+    index: number
+  ) {
+    if (draggedReferenceIndex === null) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    const fromIndex = draggedReferenceIndex;
+    setDraggedReferenceIndex(null);
+    setDragOverReferenceIndex(null);
+    void moveReferenceImage(fromIndex, index);
+  }
+
+  function handleReferenceTileDragEnd() {
+    setDraggedReferenceIndex(null);
+    setDragOverReferenceIndex(null);
+  }
+
   function restoreHistoryItem(item: AssistantHistoryItem) {
     setMode(item.input.mode);
     setIdea(item.input.idea);
@@ -369,7 +504,7 @@ export function NanoBananaAssistant({
         const image = mixImages[index];
 
         if (image) {
-          next[image.url] = reference.role;
+          next[getReferenceRoleKey(image, index)] = reference.role;
         }
       });
 
@@ -562,28 +697,61 @@ export function NanoBananaAssistant({
               </button>
 
               {mixImages.map((image, index) => {
+                const roleKey = getReferenceRoleKey(image, index);
                 const role =
-                  referenceRoles[image.url] ?? getDefaultReferenceRole(index);
+                  referenceRoles[roleKey] ?? getDefaultReferenceRole(index);
+                const isReordering = draggedReferenceIndex === index;
+                const isDropTarget =
+                  draggedReferenceIndex !== null &&
+                  draggedReferenceIndex !== index &&
+                  dragOverReferenceIndex === index;
+                const tileClassName = [
+                  "assistant-reference-tile",
+                  isReordering ? "is-reordering" : "",
+                  isDropTarget ? "is-drop-target" : ""
+                ]
+                  .filter(Boolean)
+                  .join(" ");
 
                 return (
                   <article
-                    className="assistant-reference-tile"
-                    key={image.url}
-                    title={image.sourceTitle || `参考图 ${index + 1}`}
+                    className={tileClassName}
+                    draggable={!disabled && !isReadingReferences && mixImages.length > 1}
+                    key={`${roleKey}:${index}`}
+                    title={`${image.sourceTitle || `参考图 ${index + 1}`}，拖拽可排序`}
+                    onDragStart={(event) =>
+                      handleReferenceTileDragStart(event, index)
+                    }
+                    onDragOver={(event) => handleReferenceTileDragOver(event, index)}
+                    onDrop={(event) => handleReferenceTileDrop(event, index)}
+                    onDragEnd={handleReferenceTileDragEnd}
                   >
                     <img src={image.url} alt={`参考图 ${index + 1}`} />
                     <span className="assistant-reference-index">{index + 1}</span>
-                    <Tooltip content={`移除图片 ${index + 1}`}>
-                      <button
-                        className="assistant-reference-remove"
-                        type="button"
-                        aria-label={`移除图片 ${index + 1}`}
-                        onClick={() => onRemoveReferenceImage(image.url)}
-                        disabled={disabled || isReadingReferences}
-                      >
-                        <Trash2 size={12} />
-                      </button>
-                    </Tooltip>
+                    <div className="assistant-reference-tile-actions">
+                      <Tooltip content={`复制图片 ${index + 1}`}>
+                        <button
+                          className="assistant-reference-copy"
+                          type="button"
+                          aria-label={`复制图片 ${index + 1}`}
+                          onClick={() => void duplicateReferenceImage(index)}
+                          disabled={!canAddReferenceImages}
+                        >
+                          <Copy size={11} />
+                        </button>
+                      </Tooltip>
+                      <Tooltip content={`移除图片 ${index + 1}`}>
+                        <button
+                          className="assistant-reference-remove"
+                          type="button"
+                          aria-label={`移除图片 ${index + 1}`}
+                          onClick={() => void removeReferenceImageAt(index)}
+                          disabled={disabled || isReadingReferences}
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </Tooltip>
+                    </div>
                     <Tooltip content={ROLE_HINTS[role]}>
                       <label className="assistant-reference-role-pill">
                         <span className="visually-hidden">
@@ -595,7 +763,7 @@ export function NanoBananaAssistant({
                           onChange={(event) =>
                             setReferenceRoles((current) => ({
                               ...current,
-                              [image.url]: event.target.value as AssistantReferenceRole
+                              [roleKey]: event.target.value as AssistantReferenceRole
                             }))
                           }
                         >
@@ -817,6 +985,44 @@ function AssistantResultList({
 
 function getDefaultReferenceRole(index: number): AssistantReferenceRole {
   return index === 0 ? "identity" : "style";
+}
+
+function getReferenceRoleKey(image: CapturedImage, index: number): string {
+  return image.referenceId ?? image.url ?? `reference-${index}`;
+}
+
+function createReferenceId(): string {
+  return `reference-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 8)}`;
+}
+
+function moveArrayItem<T>(items: T[], fromIndex: number, toIndex: number): T[] {
+  if (
+    fromIndex < 0 ||
+    toIndex < 0 ||
+    fromIndex >= items.length ||
+    toIndex >= items.length
+  ) {
+    return items;
+  }
+
+  const next = [...items];
+  const [item] = next.splice(fromIndex, 1);
+
+  if (!item) {
+    return items;
+  }
+
+  next.splice(toIndex, 0, item);
+  return next;
+}
+
+function isInteractiveDragTarget(target: EventTarget): boolean {
+  return (
+    target instanceof Element &&
+    Boolean(target.closest("button, input, label, select, textarea"))
+  );
 }
 
 function formatDate(value: string): string {

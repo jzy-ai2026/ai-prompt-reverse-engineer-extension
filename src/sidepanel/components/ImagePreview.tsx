@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ClipboardPaste,
+  Copy,
   FolderOpen,
+  GripVertical,
   ImagePlus,
   Images,
   Layers,
@@ -26,6 +28,7 @@ interface CapturedImage {
   sourcePageUrl?: string;
   sourceTitle?: string;
   tabId?: number;
+  referenceId?: string;
 }
 
 interface PreparedImagePayload {
@@ -50,7 +53,7 @@ interface ImagePreviewProps {
   onAnalyze: (image: CapturedImage) => void | Promise<unknown>;
   onAnalyzeMulti: (mode: "style_common" | "batch") => void | Promise<unknown>;
   onAddMixImages: (images: CapturedImage[]) => void | Promise<unknown>;
-  onRemoveMixImage: (url: string) => void | Promise<unknown>;
+  onSetMixImages: (images: CapturedImage[]) => void | Promise<unknown>;
   onClearMixImages: () => void | Promise<unknown>;
 }
 
@@ -73,7 +76,7 @@ export function ImagePreview({
   onAnalyze,
   onAnalyzeMulti,
   onAddMixImages,
-  onRemoveMixImage,
+  onSetMixImages,
   onClearMixImages
 }: ImagePreviewProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -82,6 +85,8 @@ export function ImagePreview({
   const [isReadingFile, setIsReadingFile] = useState(false);
   const [isReadingMixFiles, setIsReadingMixFiles] = useState(false);
   const [dropZone, setDropZone] = useState<DropZone>(null);
+  const [draggedMixIndex, setDraggedMixIndex] = useState<number | null>(null);
+  const [dragOverMixIndex, setDragOverMixIndex] = useState<number | null>(null);
   const previewUrl = getPreviewUrl(source, preparedImage);
   const isReading = isReadingFile || isReadingMixFiles;
 
@@ -237,6 +242,92 @@ export function ImagePreview({
     } finally {
       setIsReadingMixFiles(false);
     }
+  }
+
+  async function updateMixImages(images: CapturedImage[]) {
+    await onSetMixImages(images.slice(0, MAX_MIX_IMAGE_FILES));
+  }
+
+  function duplicateMixImage(index: number) {
+    if (mixImages.length >= MAX_MIX_IMAGE_FILES) {
+      return;
+    }
+
+    const image = mixImages[index];
+
+    if (!image) {
+      return;
+    }
+
+    const duplicatedImage: CapturedImage = {
+      ...image,
+      referenceId: createReferenceId(),
+      sourceTitle: image.sourceTitle ? `${image.sourceTitle} 复制` : "复制参考图"
+    };
+
+    void updateMixImages([
+      ...mixImages.slice(0, index + 1),
+      duplicatedImage,
+      ...mixImages.slice(index + 1)
+    ]);
+  }
+
+  function removeMixImageAt(index: number) {
+    void updateMixImages(mixImages.filter((_, imageIndex) => imageIndex !== index));
+  }
+
+  function moveMixImage(fromIndex: number, toIndex: number) {
+    const nextImages = moveArrayItem(mixImages, fromIndex, toIndex);
+
+    if (nextImages === mixImages) {
+      return;
+    }
+
+    void updateMixImages(nextImages);
+  }
+
+  function handleMixTileDragStart(
+    event: React.DragEvent<HTMLElement>,
+    index: number
+  ) {
+    if (isReading || mixImages.length < 2 || isInteractiveDragTarget(event.target)) {
+      event.preventDefault();
+      return;
+    }
+
+    setDraggedMixIndex(index);
+    setDragOverMixIndex(index);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", String(index));
+  }
+
+  function handleMixTileDragOver(
+    event: React.DragEvent<HTMLElement>,
+    index: number
+  ) {
+    if (draggedMixIndex === null) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setDragOverMixIndex(index);
+  }
+
+  function handleMixTileDrop(event: React.DragEvent<HTMLElement>, index: number) {
+    if (draggedMixIndex === null) {
+      return;
+    }
+
+    event.preventDefault();
+    moveMixImage(draggedMixIndex, index);
+    setDraggedMixIndex(null);
+    setDragOverMixIndex(null);
+  }
+
+  function handleMixTileDragEnd() {
+    setDraggedMixIndex(null);
+    setDragOverMixIndex(null);
   }
 
   return (
@@ -399,18 +490,68 @@ export function ImagePreview({
 
         {mixImages.length > 0 && (
           <div className="mix-image-grid">
-            {mixImages.map((image, index) => (
-              <div className="mix-image" key={image.url}>
-                <img src={image.url} alt={`多图参考图 ${index + 1}`} />
-                <span className="mix-image-index">{index + 1}</span>
-                <span className="mix-image-label">@图片{index + 1}</span>
-                <Tooltip content={`移除图片 ${index + 1}`}>
-                  <button type="button" onClick={() => onRemoveMixImage(image.url)}>
-                    <X size={14} />
-                  </button>
-                </Tooltip>
-              </div>
-            ))}
+            {mixImages.map((image, index) => {
+              const tileKey = image.referenceId ?? `${image.url}:${index}`;
+              const tileClassName = [
+                "mix-image",
+                draggedMixIndex === index ? "is-reordering" : "",
+                dragOverMixIndex === index && draggedMixIndex !== index
+                  ? "is-drop-target"
+                  : ""
+              ]
+                .filter(Boolean)
+                .join(" ");
+
+              return (
+                <div
+                  className={tileClassName}
+                  draggable={!isReading && mixImages.length > 1}
+                  key={tileKey}
+                  title={`${image.sourceTitle || `参考图 ${index + 1}`}，拖拽可排序`}
+                  onDragStart={(event) => handleMixTileDragStart(event, index)}
+                  onDragOver={(event) => handleMixTileDragOver(event, index)}
+                  onDrop={(event) => handleMixTileDrop(event, index)}
+                  onDragEnd={handleMixTileDragEnd}
+                >
+                  <img src={image.url} alt={`多图参考图 ${index + 1}`} />
+                  <span className="mix-image-index">{index + 1}</span>
+                  <span className="mix-image-label">@图片{index + 1}</span>
+                  <span className="mix-image-drag-handle" aria-hidden="true">
+                    <GripVertical size={12} />
+                  </span>
+                  <div className="mix-image-actions">
+                    <Tooltip
+                      content={
+                        mixImages.length >= MAX_MIX_IMAGE_FILES
+                          ? "参考图已满"
+                          : `复制图片 ${index + 1}`
+                      }
+                    >
+                      <button
+                        className="mix-image-copy"
+                        type="button"
+                        aria-label={`复制图片 ${index + 1}`}
+                        onClick={() => duplicateMixImage(index)}
+                        disabled={isReading || mixImages.length >= MAX_MIX_IMAGE_FILES}
+                      >
+                        <Copy size={12} />
+                      </button>
+                    </Tooltip>
+                    <Tooltip content={`删除图片 ${index + 1}`}>
+                      <button
+                        className="mix-image-delete"
+                        type="button"
+                        aria-label={`删除图片 ${index + 1}`}
+                        onClick={() => removeMixImageAt(index)}
+                        disabled={isReading}
+                      >
+                        <X size={13} />
+                      </button>
+                    </Tooltip>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
 
@@ -495,4 +636,34 @@ function normalizeProgress(value: number | undefined): number {
   }
 
   return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function createReferenceId(): string {
+  return `ref_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function moveArrayItem<T>(items: T[], fromIndex: number, toIndex: number): T[] {
+  if (
+    fromIndex === toIndex ||
+    fromIndex < 0 ||
+    toIndex < 0 ||
+    fromIndex >= items.length ||
+    toIndex >= items.length
+  ) {
+    return items;
+  }
+
+  const nextItems = [...items];
+  const [item] = nextItems.splice(fromIndex, 1);
+
+  if (!item) {
+    return items;
+  }
+
+  nextItems.splice(toIndex, 0, item);
+  return nextItems;
+}
+
+function isInteractiveDragTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && Boolean(target.closest("button, a, input, select, textarea"));
 }

@@ -1,3 +1,10 @@
+import {
+  compressImageBlob,
+  FAST_VISION_IMAGE_LONG_EDGE,
+  FAST_VISION_JPEG_QUALITY,
+  FAST_VISION_MAX_DATA_URL_BYTES
+} from "../../lib/imagePipeline";
+
 export interface ImportedImageFile {
   url: string;
   sourceTitle: string;
@@ -71,10 +78,20 @@ export async function createImportedImagesFromFiles(
 ): Promise<ImportedImageFile[]> {
   return Promise.all(
     files.slice(0, limit).map(async (file) => ({
-      url: await readFileAsDataUrl(file),
+      url: await readReferenceFileAsDataUrl(file),
       sourceTitle: file.webkitRelativePath || file.name || "本地参考图"
     }))
   );
+}
+
+async function readReferenceFileAsDataUrl(file: File): Promise<string> {
+  const compressed = await compressImageBlob(file, {
+    maxLongEdge: FAST_VISION_IMAGE_LONG_EDGE,
+    maxBytes: FAST_VISION_MAX_DATA_URL_BYTES,
+    initialQuality: FAST_VISION_JPEG_QUALITY
+  });
+
+  return compressed.dataUrl;
 }
 
 export function readFileAsDataUrl(file: File): Promise<string> {

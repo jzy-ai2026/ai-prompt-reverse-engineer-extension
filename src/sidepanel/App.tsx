@@ -69,6 +69,7 @@ interface CapturedImage {
   sourcePageUrl?: string;
   sourceTitle?: string;
   tabId?: number;
+  referenceId?: string;
 }
 
 interface PreparedImagePayload {
@@ -556,20 +557,6 @@ export function App() {
     [setActiveDocument, updateActiveReferenceImages]
   );
 
-  const removeMixImage = useCallback(async (url: string) => {
-    if (!hasExtensionRuntime()) {
-      setMixImages((current) => current.filter((image) => image.url !== url));
-      return;
-    }
-
-    setMixImages(
-      await sendRuntimeMessage<CapturedImage[]>({
-        type: "panel:remove-mix-image",
-        url
-      })
-    );
-  }, []);
-
   const clearMixImages = useCallback(async () => {
     if (!hasExtensionRuntime()) {
       setMixImages([]);
@@ -596,6 +583,28 @@ export function App() {
         await sendRuntimeMessage<CapturedImage[]>({
           type: "panel:add-mix-images",
           images
+        })
+      );
+    } catch (caught) {
+      setError(toUserFacingError(caught));
+    }
+  }, []);
+
+  const setMixImageQueue = useCallback(async (images: CapturedImage[]) => {
+    try {
+      setError(null);
+
+      const nextImages = images.slice(0, 6);
+
+      if (!hasExtensionRuntime()) {
+        setMixImages(nextImages);
+        return;
+      }
+
+      setMixImages(
+        await sendRuntimeMessage<CapturedImage[]>({
+          type: "panel:set-mix-images",
+          images: nextImages
         })
       );
     } catch (caught) {
@@ -838,7 +847,7 @@ export function App() {
                 }
                 onAnalyzeMulti={analyzeMulti}
                 onAddMixImages={addMixImages}
-                onRemoveMixImage={removeMixImage}
+                onSetMixImages={setMixImageQueue}
                 onClearMixImages={clearMixImages}
               />
             </div>
@@ -910,7 +919,7 @@ export function App() {
           onRemoveHistory={removeAssistantPromptHistory}
           onClearHistory={clearAssistantPromptHistory}
           onAddReferenceImages={addMixImages}
-          onRemoveReferenceImage={removeMixImage}
+          onSetReferenceImages={setMixImageQueue}
           onClearReferenceImages={clearMixImages}
         />
       )}
