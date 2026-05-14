@@ -132,12 +132,19 @@ export interface AssistantPromptInput {
   onProgress?: (event: ApiProgressEvent) => void;
 }
 
+export interface AssistantChineseCheck {
+  backTranslation: string;
+  checklist: string[];
+  possibleIssues: string[];
+}
+
 export interface AssistantPromptResult {
   brief: string;
   finalPrompt: string;
   questions: string[];
   assumptions: string[];
   negativeConstraints: string[];
+  chineseCheck?: AssistantChineseCheck;
 }
 
 type ChatRole = "system" | "user" | "assistant";
@@ -213,8 +220,13 @@ const NANO_BANANA_ASSISTANT_SYSTEM_PROMPT = [
   "If identityLock is true, preserve bone structure, eye distance, jawline geometry, age, skin texture, and facial proportions. Include DO NOT beautify, DO NOT alter age, and DO NOT change facial proportions.",
   "For charts, infographics, UI, labels, or any factual visual, do not invent facts. Say that all data and exact text must come from user-provided input.",
   "Any visible text in the image must be quoted and include font style, position, size, and treatment.",
-  "Return only a valid JSON object with this shape: brief, finalPrompt, questions, assumptions, negativeConstraints.",
-  "brief must be short Simplified Chinese. finalPrompt must be polished English. questions, assumptions, and negativeConstraints must be arrays of short Simplified Chinese strings."
+  "Return only a valid JSON object with this shape: brief, finalPrompt, chineseCheck, questions, assumptions, negativeConstraints.",
+  "brief must be short Simplified Chinese. finalPrompt must be polished English.",
+  "chineseCheck must be an object with backTranslation, checklist, and possibleIssues. All chineseCheck text must be Simplified Chinese.",
+  "chineseCheck.backTranslation must faithfully explain the meaning of finalPrompt in Chinese without adding new visual details that are not in finalPrompt.",
+  "chineseCheck.checklist must be short Chinese checks covering subject, reference-image roles, scene, style, camera or lens, identity lock, negative constraints, aspect ratio, and resolution when relevant.",
+  "chineseCheck.possibleIssues must list Chinese ambiguities the user may need to confirm. Use an empty array when there are none.",
+  "questions, assumptions, and negativeConstraints must be arrays of short Simplified Chinese strings."
 ].join("\n");
 
 export async function analyzeImagePrompt(
@@ -448,7 +460,8 @@ function createNanoBananaAssistantUserContent(
         ].join("\n")
       : "Reference images: none",
     "",
-    "Return JSON only. Use finalPrompt for the English prompt that the user can copy directly into Nano Banana Pro."
+    "Return JSON only. Use finalPrompt for the polished English prompt that the user can copy directly into Nano Banana Pro.",
+    "Also return chineseCheck so the user can review the English prompt in Chinese: backTranslation, checklist, possibleIssues."
   ]
     .filter(Boolean)
     .join("\n");
@@ -540,6 +553,13 @@ function normalizeAssistantPromptResult(value: unknown): AssistantPromptResult {
     };
   }
 
+  const chineseCheck = normalizeAssistantChineseCheck(
+    value.chineseCheck ??
+      value.chinese_check ??
+      value.chineseReview ??
+      value.chinese_review
+  );
+
   return {
     brief: readFirstString(value, ["brief", "chineseBrief", "summary"]),
     finalPrompt: readFirstString(value, [
@@ -552,7 +572,46 @@ function normalizeAssistantPromptResult(value: unknown): AssistantPromptResult {
     assumptions: readStringArray(value.assumptions),
     negativeConstraints: readStringArray(
       value.negativeConstraints ?? value.negative_constraints
-    )
+    ),
+    ...(chineseCheck ? { chineseCheck } : {})
+  };
+}
+
+function normalizeAssistantChineseCheck(
+  value: unknown
+): AssistantChineseCheck | undefined {
+  if (typeof value === "string" && value.trim()) {
+    return {
+      backTranslation: value.trim(),
+      checklist: [],
+      possibleIssues: []
+    };
+  }
+
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const backTranslation = readFirstString(value, [
+    "backTranslation",
+    "back_translation",
+    "translation",
+    "semanticBackTranslation",
+    "summary"
+  ]);
+  const checklist = readStringArray(value.checklist ?? value.checkList);
+  const possibleIssues = readStringArray(
+    value.possibleIssues ?? value.possible_issues ?? value.issues
+  );
+
+  if (!backTranslation && !checklist.length && !possibleIssues.length) {
+    return undefined;
+  }
+
+  return {
+    backTranslation,
+    checklist,
+    possibleIssues
   };
 }
 

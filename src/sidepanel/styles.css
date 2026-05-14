@@ -2833,6 +2833,47 @@ button:hover:not(:disabled) {
   line-height: 1.45;
 }
 
+.assistant-chinese-check {
+  gap: 9px;
+}
+
+.assistant-check-translation,
+.assistant-check-empty {
+  margin: 0;
+  padding: 10px;
+  border: 1px solid rgba(12, 111, 102, 0.14);
+  border-radius: 8px;
+  background: rgba(12, 111, 102, 0.055);
+  color: var(--muted-strong);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.assistant-check-empty {
+  color: var(--muted);
+}
+
+.assistant-check-group {
+  display: grid;
+  gap: 5px;
+}
+
+.assistant-check-group span {
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.assistant-check-group ul {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted-strong);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 .assistant-history-list {
   display: grid;
   gap: 8px;

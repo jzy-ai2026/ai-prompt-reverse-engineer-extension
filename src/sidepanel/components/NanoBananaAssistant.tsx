@@ -649,8 +649,8 @@ export function NanoBananaAssistant({
         <section className="panel-section assistant-output">
           <div className="section-header">
             <div>
-              <h2>结果</h2>
-              <p>{result?.brief || "等待生成，最终提示词会显示在这里"}</p>
+              <h2>最终英文提示词</h2>
+              <p>{result?.brief || "等待生成，英文提示词和中文核对会显示在这里"}</p>
             </div>
             <Tooltip content="复制最终英文提示词">
               <button
@@ -666,6 +666,7 @@ export function NanoBananaAssistant({
           {result ? (
             <>
               <div className="assistant-final-prompt">{result.finalPrompt}</div>
+              <AssistantChineseCheckPanel check={result.chineseCheck} />
               <AssistantResultList title="需要确认的问题" items={result.questions} />
               <AssistantResultList title="默认假设" items={result.assumptions} />
               <AssistantResultList
@@ -731,6 +732,63 @@ export function NanoBananaAssistant({
         )}
       </section>
     </main>
+  );
+}
+
+function AssistantChineseCheckPanel({
+  check
+}: {
+  check: AssistantPromptResult["chineseCheck"];
+}) {
+  const hasCheck =
+    Boolean(check?.backTranslation) ||
+    Boolean(check?.checklist.length) ||
+    Boolean(check?.possibleIssues.length);
+
+  if (!hasCheck) {
+    return (
+      <div className="assistant-output-block assistant-chinese-check">
+        <strong>中文核对</strong>
+        <p className="assistant-check-empty">旧记录暂无中文核对。</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="assistant-output-block assistant-chinese-check">
+      <strong>中文核对</strong>
+      {check?.backTranslation && (
+        <p className="assistant-check-translation">{check.backTranslation}</p>
+      )}
+      <AssistantCheckList title="核对清单" items={check?.checklist ?? []} />
+      <AssistantCheckList
+        title="可能需要确认"
+        items={check?.possibleIssues ?? []}
+      />
+    </div>
+  );
+}
+
+function AssistantCheckList({
+  title,
+  items
+}: {
+  title: string;
+  items: string[];
+}) {
+  if (!items.length) {
+    return null;
+  }
+
+  return (
+    <div className="assistant-check-group">
+      <span>{title}</span>
+      <ul>
+        {items.map((item) => (
+          <li key={item}>{item}</li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

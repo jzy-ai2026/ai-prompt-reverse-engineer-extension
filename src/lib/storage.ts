@@ -559,6 +559,12 @@ function normalizeStoredAssistantInput(
 
 function normalizeStoredAssistantResult(value: unknown): AssistantPromptResult {
   const record = isRecord(value) ? value : {};
+  const chineseCheck = normalizeStoredAssistantChineseCheck(
+    record.chineseCheck ??
+      record.chinese_check ??
+      record.chineseReview ??
+      record.chinese_review
+  );
 
   return {
     brief: readString(record.brief, ""),
@@ -567,7 +573,46 @@ function normalizeStoredAssistantResult(value: unknown): AssistantPromptResult {
     assumptions: readOptionalStringArray(record.assumptions),
     negativeConstraints: readOptionalStringArray(
       record.negativeConstraints ?? record.negative_constraints
-    )
+    ),
+    ...(chineseCheck ? { chineseCheck } : {})
+  };
+}
+
+function normalizeStoredAssistantChineseCheck(
+  value: unknown
+): AssistantPromptResult["chineseCheck"] {
+  if (typeof value === "string" && value.trim()) {
+    return {
+      backTranslation: value.trim(),
+      checklist: [],
+      possibleIssues: []
+    };
+  }
+
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const backTranslation =
+    readOptionalString(
+      value.backTranslation ??
+        value.back_translation ??
+        value.translation ??
+        value.summary
+    ) ?? "";
+  const checklist = readOptionalStringArray(value.checklist ?? value.checkList);
+  const possibleIssues = readOptionalStringArray(
+    value.possibleIssues ?? value.possible_issues ?? value.issues
+  );
+
+  if (!backTranslation && !checklist.length && !possibleIssues.length) {
+    return undefined;
+  }
+
+  return {
+    backTranslation,
+    checklist,
+    possibleIssues
   };
 }
 
