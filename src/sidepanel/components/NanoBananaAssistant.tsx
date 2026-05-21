@@ -6,7 +6,9 @@ import {
   ImageIcon,
   Loader2,
   RefreshCw,
+  Save,
   Send,
+  Star,
   Trash2,
   WandSparkles
 } from "lucide-react";
@@ -18,10 +20,15 @@ import type {
   AssistantPromptMode,
   AssistantPromptResult,
   AssistantReferenceRole,
+  AssistantReverseContext,
   AssistantRenderQuality,
   AssistantResolution
 } from "../../lib/openaiClient";
-import type { AssistantHistoryItem } from "../../lib/storage";
+import {
+  normalizeAssistantAspectRatio,
+  normalizeAssistantAspectRatioText
+} from "../../lib/openaiClient";
+import type { AssistantFavoriteItem, AssistantHistoryItem } from "../../lib/storage";
 import { Tooltip } from "./Tooltip";
 import {
   collectImageFiles,
@@ -47,14 +54,25 @@ interface AssistantGenerateResponse {
 
 interface NanoBananaAssistantProps {
   mixImages: CapturedImage[];
+  reverseContext?: AssistantReverseContext;
   disabled: boolean;
   onGenerate: (input: AssistantPromptInput) => Promise<AssistantGenerateResponse>;
   onGetHistory: () => Promise<AssistantHistoryItem[]>;
   onRemoveHistory: (id: string) => Promise<AssistantHistoryItem[]>;
   onClearHistory: () => Promise<void>;
+  onGetFavorites: () => Promise<AssistantFavoriteItem[]>;
+  onAddFavorite: (
+    name: string,
+    input: AssistantPromptInput,
+    result: AssistantPromptResult,
+    referenceImages?: AssistantFavoriteItem["referenceImages"]
+  ) => Promise<AssistantFavoriteItem[]>;
+  onRemoveFavorite: (id: string) => Promise<AssistantFavoriteItem[]>;
+  onClearFavorites: () => Promise<void>;
   onAddReferenceImages: (images: CapturedImage[]) => void | Promise<unknown>;
   onSetReferenceImages: (images: CapturedImage[]) => void | Promise<unknown>;
   onClearReferenceImages: () => void | Promise<unknown>;
+  onReverseContextChange: (context: AssistantReverseContext | undefined) => void;
   onSendToPhotoshop: (
     input: AssistantPromptInput,
     result: AssistantPromptResult,
@@ -112,7 +130,7 @@ const ROLE_HINTS: Record<AssistantReferenceRole, string> = {
   material: "参考材质、表面处理、纹理和细节密度。"
 };
 
-const ASPECT_RATIOS: AssistantAspectRatio[] = [
+const ASPECT_RATIOS = [
   "1:1",
   "2:3",
   "3:2",
@@ -123,9 +141,11 @@ const ASPECT_RATIOS: AssistantAspectRatio[] = [
   "9:16",
   "16:9",
   "21:9"
-];
+] as const;
 
-const ASPECT_RATIO_LABELS: Record<AssistantAspectRatio, string> = {
+type AssistantAspectRatioPreset = (typeof ASPECT_RATIOS)[number];
+
+const ASPECT_RATIO_LABELS: Record<AssistantAspectRatioPreset, string> = {
   "1:1": "1:1 方图",
   "2:3": "2:3 竖版",
   "3:2": "3:2 横版",
@@ -202,42 +222,116 @@ const PHOTOSHOP_TARGET_STAGES = [
 type PhotoshopTargetStageId =
   (typeof PHOTOSHOP_TARGET_STAGES)[number]["value"];
 
+const ASSISTANT_DRAFT_STORAGE_KEY = "aiPromptReverseAssistantDraftV1";
+const MJ_PARAMETER_PRESETS_STORAGE_KEY = "aiPromptReverseMjPresetsV1";
+const MAX_MJ_PARAMETER_PRESETS = 12;
+
+interface AssistantDraftState {
+  engine: AssistantEngine;
+  mode: AssistantPromptMode;
+  idea: string;
+  aspectRatio: AssistantAspectRatio;
+  resolution: AssistantResolution;
+  renderQuality: AssistantRenderQuality;
+  rawEnabled: boolean;
+  stylize: number;
+  isStylizeDirty: boolean;
+  chaos: number;
+  weird: number;
+  seed: string;
+  negativePrompt: string;
+  personalizationCode: string;
+  identityLock: boolean;
+  photoshopTargetStageId: PhotoshopTargetStageId;
+  extraSpecs: string;
+  reverseContext?: AssistantReverseContext;
+  result?: AssistantPromptResult | null;
+}
+
+interface MjParameterPreset {
+  id: string;
+  name: string;
+  createdAt: string;
+  aspectRatio?: AssistantAspectRatio;
+  renderQuality: AssistantRenderQuality;
+  rawEnabled: boolean;
+  stylize: number;
+  chaos: number;
+  weird: number;
+  seed: string;
+  personalizationCode: string;
+  negativePrompt: string;
+}
+
 export function NanoBananaAssistant({
   mixImages,
+  reverseContext,
   disabled,
   onGenerate,
   onGetHistory,
   onRemoveHistory,
   onClearHistory,
+  onGetFavorites,
+  onAddFavorite,
+  onRemoveFavorite,
+  onClearFavorites,
   onAddReferenceImages,
   onSetReferenceImages,
   onClearReferenceImages,
+  onReverseContextChange,
   onSendToPhotoshop
 }: NanoBananaAssistantProps) {
   const referenceInputRef = useRef<HTMLInputElement | null>(null);
-  const [engine, setEngine] = useState<AssistantEngine>("nano-banana-pro");
-  const [mode, setMode] = useState<AssistantPromptMode>("auto");
-  const [idea, setIdea] = useState("");
-  const [aspectRatio, setAspectRatio] = useState<AssistantAspectRatio>("16:9");
-  const [resolution, setResolution] = useState<AssistantResolution>("2K");
-  const [renderQuality, setRenderQuality] = useState<AssistantRenderQuality>("hd");
-  const [rawEnabled, setRawEnabled] = useState(true);
-  const [stylize, setStylize] = useState(120);
-  const [isStylizeDirty, setIsStylizeDirty] = useState(false);
-  const [chaos, setChaos] = useState(0);
-  const [weird, setWeird] = useState(0);
-  const [seed, setSeed] = useState("");
-  const [negativePrompt, setNegativePrompt] = useState("");
-  const [personalizationCode, setPersonalizationCode] = useState("");
-  const [identityLock, setIdentityLock] = useState(false);
+  const assistantDraft = useMemo(readAssistantDraftState, []);
+  const [engine, setEngine] = useState<AssistantEngine>(
+    assistantDraft?.engine ?? "nano-banana-pro"
+  );
+  const [mode, setMode] = useState<AssistantPromptMode>(
+    assistantDraft?.mode ?? "auto"
+  );
+  const [idea, setIdea] = useState(assistantDraft?.idea ?? "");
+  const [aspectRatio, setAspectRatio] = useState<AssistantAspectRatio>(
+    assistantDraft?.aspectRatio ?? "16:9"
+  );
+  const [resolution, setResolution] = useState<AssistantResolution>(
+    assistantDraft?.resolution ?? "2K"
+  );
+  const [renderQuality, setRenderQuality] = useState<AssistantRenderQuality>(
+    assistantDraft?.renderQuality ?? "hd"
+  );
+  const [rawEnabled, setRawEnabled] = useState(assistantDraft?.rawEnabled ?? true);
+  const [stylize, setStylize] = useState(assistantDraft?.stylize ?? 120);
+  const [isStylizeDirty, setIsStylizeDirty] = useState(
+    assistantDraft?.isStylizeDirty ?? false
+  );
+  const [chaos, setChaos] = useState(assistantDraft?.chaos ?? 0);
+  const [weird, setWeird] = useState(assistantDraft?.weird ?? 0);
+  const [seed, setSeed] = useState(assistantDraft?.seed ?? "");
+  const [negativePrompt, setNegativePrompt] = useState(
+    assistantDraft?.negativePrompt ?? ""
+  );
+  const [personalizationCode, setPersonalizationCode] = useState(
+    assistantDraft?.personalizationCode ?? ""
+  );
+  const [identityLock, setIdentityLock] = useState(
+    assistantDraft?.identityLock ?? false
+  );
   const [photoshopTargetStageId, setPhotoshopTargetStageId] =
-    useState<PhotoshopTargetStageId>("");
-  const [extraSpecs, setExtraSpecs] = useState("");
+    useState<PhotoshopTargetStageId>(
+      assistantDraft?.photoshopTargetStageId ?? ""
+    );
+  const [extraSpecs, setExtraSpecs] = useState(assistantDraft?.extraSpecs ?? "");
+  const [fallbackReverseContext, setFallbackReverseContext] = useState<
+    AssistantReverseContext | undefined
+  >(assistantDraft?.reverseContext);
   const [referenceRoles, setReferenceRoles] = useState<
     Record<string, AssistantReferenceRole>
   >({});
-  const [result, setResult] = useState<AssistantPromptResult | null>(null);
+  const [result, setResult] = useState<AssistantPromptResult | null>(
+    assistantDraft?.result ?? null
+  );
   const [history, setHistory] = useState<AssistantHistoryItem[]>([]);
+  const [favorites, setFavorites] = useState<AssistantFavoriteItem[]>([]);
   const [error, setError] = useState<UserFacingError | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isReadingReferences, setIsReadingReferences] = useState(false);
@@ -251,10 +345,73 @@ export function NanoBananaAssistant({
   >(null);
   const [copied, setCopied] = useState(false);
   const [sentToPhotoshop, setSentToPhotoshop] = useState(false);
+  const [mjPresets, setMjPresets] = useState<MjParameterPreset[]>(
+    readMjParameterPresets
+  );
+  const [selectedMjPresetId, setSelectedMjPresetId] = useState("");
+  const activeReverseContext = reverseContext ?? fallbackReverseContext;
 
   useEffect(() => {
     void onGetHistory().then(setHistory).catch(() => setHistory([]));
   }, [onGetHistory]);
+
+  useEffect(() => {
+    void onGetFavorites().then(setFavorites).catch(() => setFavorites([]));
+  }, [onGetFavorites]);
+
+  useEffect(() => {
+    if (reverseContext) {
+      setFallbackReverseContext(reverseContext);
+    }
+  }, [reverseContext]);
+
+  useEffect(() => {
+    writeAssistantDraftState({
+      engine,
+      mode,
+      idea,
+      aspectRatio,
+      resolution,
+      renderQuality,
+      rawEnabled,
+      stylize,
+      isStylizeDirty,
+      chaos,
+      weird,
+      seed,
+      negativePrompt,
+      personalizationCode,
+      identityLock,
+      photoshopTargetStageId,
+      extraSpecs,
+      reverseContext: activeReverseContext,
+      result
+    });
+  }, [
+    activeReverseContext,
+    aspectRatio,
+    chaos,
+    engine,
+    extraSpecs,
+    idea,
+    identityLock,
+    isStylizeDirty,
+    mode,
+    negativePrompt,
+    personalizationCode,
+    photoshopTargetStageId,
+    rawEnabled,
+    renderQuality,
+    resolution,
+    result,
+    seed,
+    stylize,
+    weird
+  ]);
+
+  useEffect(() => {
+    writeMjParameterPresets(mjPresets);
+  }, [mjPresets]);
 
   useEffect(() => {
     setReferenceRoles((current) => {
@@ -301,8 +458,19 @@ export function NanoBananaAssistant({
     [mixImages, referenceRoles]
   );
 
-  const canGenerate = idea.trim().length > 0 && !isLoading && !disabled;
   const isMidjourney = engine === "midjourney-v8.1";
+  const normalizedMjAspectRatio = normalizeAssistantAspectRatio(aspectRatio);
+  const aspectRatioError =
+    isMidjourney && !normalizedMjAspectRatio
+      ? "MJ 画幅比例必须是正整数:正整数，例如 7:3、85:110 或 1920:1080。"
+      : "";
+  const displayAspectRatio = getAssistantAspectRatioForEngine(engine, aspectRatio);
+  const hasReverseContext = Boolean(activeReverseContext);
+  const canGenerate =
+    (idea.trim().length > 0 || hasReverseContext) &&
+    !aspectRatioError &&
+    !isLoading &&
+    !disabled;
   const currentEngine = ASSISTANT_ENGINES.find((item) => item.value === engine);
   const currentMode = ASSISTANT_MODES.find((item) => item.value === mode);
   const currentRenderQuality =
@@ -336,7 +504,7 @@ export function NanoBananaAssistant({
   }, [aspectRatio, isMidjourney, isStylizeDirty, renderQuality]);
 
   async function generatePrompt() {
-    if (!idea.trim()) {
+    if (!idea.trim() && !activeReverseContext) {
       setError({
         code: "missing_config",
         title: "缺少想法",
@@ -348,30 +516,21 @@ export function NanoBananaAssistant({
       return;
     }
 
+    if (aspectRatioError) {
+      setError({
+        code: "missing_config",
+        title: "画幅比例无效",
+        message: aspectRatioError,
+        canRetry: false
+      });
+      return;
+    }
+
     setIsLoading(true);
     setError(null);
 
     try {
-      const response = await onGenerate({
-        engine,
-        mode,
-        idea,
-        references,
-        aspectRatio,
-        resolution,
-        identityLock,
-        extraSpecs: extraSpecs.trim() || undefined,
-        rawEnabled: isMidjourney ? rawEnabled : undefined,
-        renderQuality: isMidjourney ? renderQuality : undefined,
-        stylize: isMidjourney ? stylize : undefined,
-        chaos: isMidjourney ? chaos : undefined,
-        weird: isMidjourney ? weird : undefined,
-        seed: isMidjourney ? seed.trim() || undefined : undefined,
-        negativePrompt: isMidjourney ? negativePrompt.trim() || undefined : undefined,
-        personalizationCode: isMidjourney
-          ? personalizationCode.trim() || undefined
-          : undefined
-      });
+      const response = await onGenerate(createAssistantInput());
 
       setResult(response.result);
       setHistory(response.history);
@@ -415,13 +574,26 @@ export function NanoBananaAssistant({
     setHistory(await onGetHistory());
   }
 
+  async function refreshFavorites() {
+    setFavorites(await onGetFavorites());
+  }
+
   async function removeHistory(id: string) {
     setHistory(await onRemoveHistory(id));
+  }
+
+  async function removeFavorite(id: string) {
+    setFavorites(await onRemoveFavorite(id));
   }
 
   async function clearHistory() {
     await onClearHistory();
     setHistory([]);
+  }
+
+  async function clearFavorites() {
+    await onClearFavorites();
+    setFavorites([]);
   }
 
   function createAssistantInput(): AssistantPromptInput {
@@ -430,9 +602,10 @@ export function NanoBananaAssistant({
       mode,
       idea,
       references,
-      aspectRatio,
+      aspectRatio: getAssistantAspectRatioForEngine(engine, aspectRatio),
       resolution,
       identityLock,
+      reverseContext: activeReverseContext,
       extraSpecs: extraSpecs.trim() || undefined,
       rawEnabled: isMidjourney ? rawEnabled : undefined,
       renderQuality: isMidjourney ? renderQuality : undefined,
@@ -445,6 +618,137 @@ export function NanoBananaAssistant({
         ? personalizationCode.trim() || undefined
         : undefined
     };
+  }
+
+  function updateReverseContext(context: AssistantReverseContext | undefined) {
+    setFallbackReverseContext(context);
+    onReverseContextChange(context);
+  }
+
+  function clearReverseContext() {
+    updateReverseContext(undefined);
+  }
+
+  function saveCurrentMjPreset() {
+    const presetAspectRatio = normalizeAssistantAspectRatio(aspectRatio);
+
+    if (!presetAspectRatio) {
+      setError({
+        code: "missing_config",
+        title: "画幅比例无效",
+        message: "MJ 画幅比例必须是正整数:正整数，例如 7:3、85:110 或 1920:1080。",
+        canRetry: false
+      });
+      return;
+    }
+
+    const fallbackName = `MJ ${presetAspectRatio} ${renderQuality.toUpperCase()} S${stylize} C${chaos}`;
+    const name = window.prompt("预设名称", fallbackName)?.trim();
+
+    if (!name) {
+      return;
+    }
+
+    const preset: MjParameterPreset = {
+      id: createPresetId(),
+      name,
+      createdAt: new Date().toISOString(),
+      aspectRatio: presetAspectRatio,
+      renderQuality,
+      rawEnabled,
+      stylize,
+      chaos,
+      weird,
+      seed: seed.trim(),
+      personalizationCode: personalizationCode.trim(),
+      negativePrompt: negativePrompt.trim()
+    };
+
+    setMjPresets((current) =>
+      [
+        preset,
+        ...current.filter((item) => item.name !== name)
+      ].slice(0, MAX_MJ_PARAMETER_PRESETS)
+    );
+    setSelectedMjPresetId(preset.id);
+  }
+
+  function applyMjPreset(presetId: string) {
+    setSelectedMjPresetId(presetId);
+
+    const preset = mjPresets.find((item) => item.id === presetId);
+
+    if (!preset) {
+      return;
+    }
+
+    if (preset.aspectRatio) {
+      setAspectRatio(preset.aspectRatio);
+    }
+
+    setRenderQuality(preset.renderQuality);
+    setRawEnabled(preset.rawEnabled);
+    setStylize(preset.stylize);
+    setIsStylizeDirty(true);
+    setChaos(preset.chaos);
+    setWeird(preset.weird);
+    setSeed(preset.seed);
+    setPersonalizationCode(preset.personalizationCode);
+    setNegativePrompt(preset.negativePrompt);
+  }
+
+  function deleteSelectedMjPreset() {
+    if (!selectedMjPresetId) {
+      return;
+    }
+
+    setMjPresets((current) =>
+      current.filter((item) => item.id !== selectedMjPresetId)
+    );
+    setSelectedMjPresetId("");
+  }
+
+  async function saveCurrentFavorite() {
+    if (!result?.finalPrompt) {
+      return;
+    }
+
+    await saveFavoriteFromItem({
+      input: createAssistantInput(),
+      result,
+      referenceImages: createFavoriteReferenceImages(mixImages)
+    });
+  }
+
+  async function saveHistoryFavorite(item: AssistantHistoryItem) {
+    await saveFavoriteFromItem(item);
+  }
+
+  async function saveFavoriteFromItem(item: {
+    input: AssistantPromptInput;
+    result: AssistantPromptResult;
+    referenceImages?: AssistantFavoriteItem["referenceImages"];
+    summaryTitle?: string;
+  }) {
+    if (!item.result.finalPrompt?.trim()) {
+      return;
+    }
+
+    const fallbackName =
+      item.result.brief || item.summaryTitle || item.input.idea || "收藏提示词";
+    const name = window.prompt("收藏名称", fallbackName)?.trim();
+
+    if (!name) {
+      return;
+    }
+
+    try {
+      setFavorites(
+        await onAddFavorite(name, item.input, item.result, item.referenceImages)
+      );
+    } catch (caught) {
+      setError(toUserFacingError(caught));
+    }
   }
 
   async function addReferenceFiles(files: File[]) {
@@ -647,7 +951,15 @@ export function NanoBananaAssistant({
     setDragOverReferenceIndex(null);
   }
 
-  function restoreHistoryItem(item: AssistantHistoryItem) {
+  async function restoreAssistantItem(
+    item: AssistantHistoryItem | AssistantFavoriteItem
+  ) {
+    const restoredImages = createCapturedImagesFromFavoriteItem(item);
+
+    if (restoredImages.length) {
+      await onSetReferenceImages(restoredImages);
+    }
+
     setEngine(item.input.engine);
     setMode(item.input.mode);
     setIdea(item.input.idea);
@@ -666,13 +978,15 @@ export function NanoBananaAssistant({
     setPersonalizationCode(item.input.personalizationCode ?? "");
     setIdentityLock(item.input.identityLock);
     setExtraSpecs(item.input.extraSpecs ?? "");
+    updateReverseContext(item.input.reverseContext);
     setResult(item.result);
     setError(null);
     setReferenceRoles((current) => {
       const next = { ...current };
+      const roleImages = restoredImages.length ? restoredImages : mixImages;
 
       item.input.references.forEach((reference, index) => {
-        const image = mixImages[index];
+        const image = roleImages[index];
 
         if (image) {
           next[getReferenceRoleKey(image, index)] = reference.role;
@@ -699,9 +1013,9 @@ export function NanoBananaAssistant({
               {mixImages.length ? `${mixImages.length} / 6 张参考图` : "纯文本"}
             </span>
           </Tooltip>
-          <Tooltip content={`${activeQualityHint} 当前画幅为 ${aspectRatio}。`}>
+          <Tooltip content={`${activeQualityHint} 当前画幅为 ${displayAspectRatio}。`}>
             <span>
-              {isMidjourney ? renderQuality.toUpperCase() : resolution} · {aspectRatio}
+              {isMidjourney ? renderQuality.toUpperCase() : resolution} · {displayAspectRatio}
             </span>
           </Tooltip>
         </div>
@@ -761,6 +1075,48 @@ export function NanoBananaAssistant({
             </div>
           </details>
 
+          {activeReverseContext && (
+            <section className="assistant-reverse-context-card">
+              <div className="assistant-reverse-context-head">
+                <div>
+                  <strong>已带入当前反推 JSON</strong>
+                  <span>
+                    {activeReverseContext.templateName || "工作区反推结果"} / {activeReverseContext.sourceType}
+                  </span>
+                </div>
+                <Tooltip content="清除反推 JSON 上下文，只保留文字想法和参考图">
+                  <button
+                    type="button"
+                    onClick={clearReverseContext}
+                    aria-label="清除反推 JSON 上下文"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </Tooltip>
+              </div>
+              <div className="assistant-reverse-context-grid">
+                {createReverseContextChips(activeReverseContext).map((item) => (
+                  <div className="assistant-reverse-context-chip" key={item.label}>
+                    <span>{item.label}</span>
+                    <strong>{item.value}</strong>
+                  </div>
+                ))}
+              </div>
+              <div className="assistant-reverse-context-preview">
+                <strong>自然语言预览</strong>
+                <p>{createReverseContextPreview(activeReverseContext)}</p>
+                {activeReverseContext.negativePrompt && (
+                  <span>
+                    负面约束：{truncateReverseContextText(activeReverseContext.negativePrompt, 160)}
+                  </span>
+                )}
+              </div>
+              <p>
+                没写想法时会默认延续这张图的风格、构图、镜头、光影和色彩；写了想法时，以新主体为主，只继承视觉语言。
+              </p>
+            </section>
+          )}
+
           <div className="assistant-mode-grid" role="tablist" aria-label="任务类型">
             {ASSISTANT_MODES.map((item) => (
               <Tooltip content={item.hint} key={item.value}>
@@ -797,20 +1153,67 @@ export function NanoBananaAssistant({
           <div className="assistant-control-grid">
             <label className="field-label">
               <span>画幅比例</span>
-              <Tooltip content="决定最终画面的宽高关系，例如海报常用 4:5 或 9:16，横版封面常用 16:9。">
-                <select
-                  value={aspectRatio}
-                  onChange={(event) =>
-                    setAspectRatio(event.target.value as AssistantAspectRatio)
-                  }
-                >
-                  {ASPECT_RATIOS.map((item) => (
-                    <option value={item} key={item}>
-                      {ASPECT_RATIO_LABELS[item]}
-                    </option>
-                  ))}
-                </select>
-              </Tooltip>
+              {isMidjourney ? (
+                <div className="assistant-aspect-control">
+                  <Tooltip content="MJ 支持正整数比例，例如 7:3、85:110 或 1920:1080；不支持 1.39:1 这类小数。">
+                    <div className="assistant-aspect-row">
+                      <select
+                        value={getAspectRatioPresetValue(aspectRatio)}
+                        onChange={(event) => {
+                          if (event.target.value) {
+                            setAspectRatio(event.target.value);
+                          }
+                        }}
+                      >
+                        <option value="">自定义比例</option>
+                        {ASPECT_RATIOS.map((item) => (
+                          <option value={item} key={item}>
+                            {ASPECT_RATIO_LABELS[item]}
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        value={aspectRatio}
+                        onBlur={() => {
+                          const normalized =
+                            normalizeAssistantAspectRatio(aspectRatio);
+
+                          if (normalized) {
+                            setAspectRatio(normalized);
+                          }
+                        }}
+                        onChange={(event) =>
+                          setAspectRatio(
+                            normalizeAssistantAspectRatioText(event.target.value)
+                          )
+                        }
+                        aria-invalid={Boolean(aspectRatioError)}
+                        placeholder="7:3"
+                      />
+                    </div>
+                  </Tooltip>
+                  {aspectRatioError && (
+                    <span className="assistant-field-error">
+                      {aspectRatioError}
+                    </span>
+                  )}
+                </div>
+              ) : (
+                <Tooltip content="决定最终画面的宽高关系，例如海报常用 4:5 或 9:16，横版封面常用 16:9。">
+                  <select
+                    value={getFixedAspectRatioValue(aspectRatio)}
+                    onChange={(event) =>
+                      setAspectRatio(event.target.value as AssistantAspectRatio)
+                    }
+                  >
+                    {ASPECT_RATIOS.map((item) => (
+                      <option value={item} key={item}>
+                        {ASPECT_RATIO_LABELS[item]}
+                      </option>
+                    ))}
+                  </select>
+                </Tooltip>
+              )}
             </label>
 
             {isMidjourney ? (
@@ -868,6 +1271,46 @@ export function NanoBananaAssistant({
               <div className="assistant-mj-header">
                 <strong>MJ V8.1 参数</strong>
                 <span>自动输出 --v 8.1，非法旧参数会被清理</span>
+              </div>
+
+              <div className="assistant-mj-help">
+                <span><strong>Stylize</strong> 0-1000：80 偏写实控制，120 通用默认，150-250 更有风格化。</span>
+                <span><strong>Chaos</strong> 0-100：0 稳定，10-25 轻探索，50+ 明显发散。</span>
+                <span><strong>Weird</strong> 0-3000：常用 0-250，高值会让造型更怪异。</span>
+                <span><strong>Personalization</strong> 填 --p 后面的 code；<strong>Negative Prompt</strong> 会统一写进 --no。</span>
+              </div>
+
+              <div className="assistant-mj-presets">
+                <label className="field-label">
+                  <span>参数预设</span>
+                  <select
+                    value={selectedMjPresetId}
+                    onChange={(event) => applyMjPreset(event.target.value)}
+                  >
+                    <option value="">选择已保存预设</option>
+                    {mjPresets.map((preset) => (
+                      <option value={preset.id} key={preset.id}>
+                        {formatMjPresetLabel(preset)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  onClick={saveCurrentMjPreset}
+                  disabled={Boolean(aspectRatioError)}
+                >
+                  <Save size={14} />
+                  <span>保存当前预设</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={deleteSelectedMjPreset}
+                  disabled={!selectedMjPresetId}
+                  aria-label="删除当前 MJ 参数预设"
+                >
+                  <Trash2 size={14} />
+                </button>
               </div>
 
               <Tooltip content="写实摄影、电影剧照、3A 游戏、产品和建筑默认建议启用 Raw。">
@@ -1221,6 +1664,15 @@ export function NanoBananaAssistant({
                   {copied ? <Check size={16} /> : <Copy size={16} />}
                 </button>
               </Tooltip>
+              <Tooltip content="收藏当前提示词，之后可继续编辑复用">
+                <button
+                  type="button"
+                  onClick={() => void saveCurrentFavorite()}
+                  disabled={!result?.finalPrompt}
+                >
+                  <Star size={16} />
+                </button>
+              </Tooltip>
             </div>
           </div>
 
@@ -1240,6 +1692,64 @@ export function NanoBananaAssistant({
           )}
         </section>
       </div>
+
+      <section className="panel-section assistant-history-panel assistant-favorites-panel">
+        <div className="section-header">
+          <div>
+            <h2>收藏提示词</h2>
+            <p>最多 100 条，可恢复后继续编辑</p>
+          </div>
+          <div className="button-row compact">
+            <Tooltip content="刷新收藏提示词">
+              <button type="button" onClick={refreshFavorites}>
+                <RefreshCw size={16} />
+              </button>
+            </Tooltip>
+            <Tooltip content="清空收藏提示词">
+              <button
+                type="button"
+                onClick={clearFavorites}
+                disabled={!favorites.length}
+              >
+                <Trash2 size={16} />
+              </button>
+            </Tooltip>
+          </div>
+        </div>
+
+        {favorites.length ? (
+          <div className="assistant-history-list">
+            {favorites.map((item) => (
+              <article
+                className="assistant-history-item assistant-favorite-item"
+                key={item.id}
+              >
+                <Tooltip content="恢复这条收藏并继续编辑">
+                  <button
+                    type="button"
+                    onClick={() => void restoreAssistantItem(item)}
+                  >
+                    <strong>{item.name}</strong>
+                    <span>{item.summarySubtitle}</span>
+                    <time>{formatDate(item.updatedAt)}</time>
+                  </button>
+                </Tooltip>
+                <Tooltip content="删除这条收藏">
+                  <button
+                    className="icon-danger"
+                    type="button"
+                    onClick={() => removeFavorite(item.id)}
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                </Tooltip>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <div className="empty-state">暂无收藏提示词</div>
+        )}
+      </section>
 
       <section className="panel-section assistant-history-panel">
         <div className="section-header">
@@ -1270,10 +1780,22 @@ export function NanoBananaAssistant({
             {history.map((item) => (
               <article className="assistant-history-item" key={item.id}>
                 <Tooltip content="恢复这条助手记录">
-                  <button type="button" onClick={() => restoreHistoryItem(item)}>
+                  <button
+                    type="button"
+                    onClick={() => void restoreAssistantItem(item)}
+                  >
                     <strong>{item.summaryTitle}</strong>
                     <span>{item.summarySubtitle}</span>
                     <time>{formatDate(item.createdAt)}</time>
+                  </button>
+                </Tooltip>
+                <Tooltip content="收藏这条助手历史">
+                  <button
+                    type="button"
+                    onClick={() => void saveHistoryFavorite(item)}
+                    disabled={!item.result.finalPrompt}
+                  >
+                    <Star size={15} />
                   </button>
                 </Tooltip>
                 <Tooltip content="删除这条助手记录">
@@ -1396,6 +1918,570 @@ function AssistantResultList({
   );
 }
 
+function createReverseContextChips(
+  context: AssistantReverseContext
+): Array<{ label: string; value: string }> {
+  const chips = [
+    { label: "风格", value: context.fields.style },
+    { label: "构图", value: context.fields.composition },
+    { label: "镜头", value: context.fields.camera },
+    { label: "光影", value: context.fields.lighting },
+    { label: "色彩", value: context.fields.color },
+    { label: "氛围", value: context.fields.mood }
+  ]
+    .map((item) => ({
+      label: item.label,
+      value: cleanReverseContextText(item.value ?? "")
+    }))
+    .filter((item): item is { label: string; value: string } => Boolean(item.value))
+    .slice(0, 6)
+    .map((item) => ({
+      label: item.label,
+      value: truncateReverseContextChip(item.value)
+    }));
+
+  if (chips.length) {
+    return chips;
+  }
+
+  return [
+    {
+      label: "反推 Prompt",
+      value: truncateReverseContextChip(
+        cleanReverseContextText(context.promptText) ||
+          createStructuredJsonSummary(context.structuredJson) ||
+          "当前结果缺少可用风格信息"
+      )
+    }
+  ];
+}
+
+function truncateReverseContextChip(value: string): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+
+  if (normalized.length <= 72) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, 72)}...`;
+}
+
+function createReverseContextPreview(context: AssistantReverseContext): string {
+  const fields = context.fields;
+  const promptText = cleanReverseContextText(context.promptText);
+  const jsonSummary = createStructuredJsonSummary(context.structuredJson);
+  const parts = [
+    createReverseContextFieldSentence("风格延续", fields.style),
+    createReverseContextFieldSentence("构图采用", fields.composition),
+    createReverseContextFieldSentence("镜头语言参考", fields.camera),
+    createReverseContextFieldSentence("光影保持", fields.lighting),
+    createReverseContextFieldSentence("色彩倾向", fields.color),
+    createReverseContextFieldSentence("整体氛围为", fields.mood)
+  ].filter(Boolean);
+
+  if (!parts.length && promptText) {
+    return truncateReverseContextText(
+      `将参考当前反推 Prompt：${promptText}。助手会从这段提示词中提取风格、构图、镜头、光影、色彩和氛围；如果你补充新主体、用途或题材，输出会以新主体为主，只沿用这段提示词的视觉语言。`,
+      420
+    );
+  }
+
+  if (!parts.length && jsonSummary) {
+    return truncateReverseContextText(
+      `将参考当前反推 JSON 的有效描述：${jsonSummary}。助手会把这些内容转成 MJ / Nano 可用的风格、构图、镜头和光影提示词；如果你补充新主体，会以新主体为主。`,
+      420
+    );
+  }
+
+  if (!parts.length) {
+    return "当前反推结果还没有有效的风格、构图、镜头或光影描述。建议先完成图片分析，或切换到“风格提取 / 电影大师 / JSON提示词反推”等模板后再带入助手。";
+  }
+
+  const subjectText = cleanReverseContextText(fields.subject ?? "");
+  const promptHint = promptText ? `当前反推 Prompt 可作为补充参考：${promptText}。` : "";
+  const subjectHint = subjectText ? `原图主体只作为参考：${subjectText}。` : "";
+  const guidance =
+    "生成时会优先继承这些视觉特征；如果你在想法里写新主体、用途或题材，输出会以新主体为主。";
+
+  return truncateReverseContextText(
+    `${parts.join("；")}。${subjectHint}${promptHint}${guidance}`,
+    420
+  );
+}
+
+function normalizeReverseContextText(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function createReverseContextFieldSentence(
+  prefix: string,
+  value: string | undefined
+): string {
+  const text = cleanReverseContextText(value ?? "");
+  return text ? `${prefix} ${text}` : "";
+}
+
+function cleanReverseContextText(value: string): string {
+  const normalized = normalizeReverseContextText(value);
+
+  if (!normalized) {
+    return "";
+  }
+
+  const segments = normalized
+    .split(/[，,；;。|\n]+/)
+    .map((segment) => segment.trim())
+    .filter(isMeaningfulReverseContextText);
+
+  if (segments.length) {
+    return segments.join("，");
+  }
+
+  return isMeaningfulReverseContextText(normalized) ? normalized : "";
+}
+
+function isMeaningfulReverseContextText(value: string): boolean {
+  const normalized = normalizeReverseContextText(value).toLowerCase();
+  const compact = normalized.replace(/\s+/g, "");
+
+  if (!compact) {
+    return false;
+  }
+
+  if (
+    ["unknown", "n/a", "na", "none", "null", "undefined"].includes(compact) ||
+    compact.startsWith("未识别")
+  ) {
+    return false;
+  }
+
+  const withoutPlaceholders = compact
+    .replace(/未识别(主体|风格|光影|色调|色彩|构图|镜头|氛围|画面|内容)/g, "")
+    .replace(/高质量[，,]?细节丰富/g, "")
+    .replace(/[，,。；;、:：|.\-_]/g, "");
+
+  return withoutPlaceholders.length >= 2;
+}
+
+function createStructuredJsonSummary(value: string): string {
+  const normalized = normalizeReverseContextText(value);
+
+  if (!normalized) {
+    return "";
+  }
+
+  try {
+    const parsed = JSON.parse(normalized) as unknown;
+    const collected = collectMeaningfulJsonStrings(parsed);
+
+    if (collected.length) {
+      return truncateReverseContextText(collected.slice(0, 6).join("；"), 320);
+    }
+  } catch {
+    // Fall through to text cleanup for hand-edited JSON fragments.
+  }
+
+  return truncateReverseContextText(cleanReverseContextText(normalized), 320);
+}
+
+function collectMeaningfulJsonStrings(value: unknown): string[] {
+  const output: string[] = [];
+  const seen = new Set<string>();
+
+  function visit(current: unknown) {
+    if (output.length >= 10) {
+      return;
+    }
+
+    if (typeof current === "string") {
+      const cleaned = cleanReverseContextText(current);
+
+      if (cleaned && !seen.has(cleaned)) {
+        seen.add(cleaned);
+        output.push(cleaned);
+      }
+
+      return;
+    }
+
+    if (Array.isArray(current)) {
+      current.forEach(visit);
+      return;
+    }
+
+    if (!isRecord(current)) {
+      return;
+    }
+
+    Object.entries(current).forEach(([key, nestedValue]) => {
+      if (/^(id|url|source|metadata|version|generated_at)$/i.test(key)) {
+        return;
+      }
+
+      visit(nestedValue);
+    });
+  }
+
+  visit(value);
+  return output;
+}
+
+function truncateReverseContextText(value: string, limit: number): string {
+  const normalized = normalizeReverseContextText(value);
+
+  if (normalized.length <= limit) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, limit)}...`;
+}
+
+function createPresetId(): string {
+  return `mj-preset-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 8)}`;
+}
+
+function formatMjPresetLabel(preset: MjParameterPreset): string {
+  return preset.aspectRatio ? `${preset.name} · ${preset.aspectRatio}` : preset.name;
+}
+
+function createFavoriteReferenceImages(
+  images: CapturedImage[]
+): NonNullable<AssistantFavoriteItem["referenceImages"]> {
+  return images.slice(0, MAX_REFERENCE_IMAGE_FILES).map((image, index) => ({
+    id: image.referenceId ?? `favorite-ref-${index + 1}`,
+    url: image.url,
+    sourceImageUrl: image.url,
+    sourcePageUrl: image.sourcePageUrl,
+    sourceTitle: image.sourceTitle,
+    thumbnail: image.url
+  }));
+}
+
+function createCapturedImagesFromFavoriteItem(
+  item: AssistantHistoryItem | AssistantFavoriteItem
+): CapturedImage[] {
+  const fromReferenceImages = (item.referenceImages ?? [])
+    .map((reference): CapturedImage | undefined => {
+      const url = reference.url ?? reference.thumbnail ?? reference.sourceImageUrl;
+
+      return url
+        ? {
+            url,
+            sourcePageUrl: reference.sourcePageUrl,
+            sourceTitle: reference.sourceTitle,
+            referenceId: reference.id
+          }
+        : undefined;
+    })
+    .filter((image): image is CapturedImage => Boolean(image));
+
+  if (fromReferenceImages.length) {
+    return fromReferenceImages;
+  }
+
+  return item.input.references
+    .map((reference, index): CapturedImage | undefined => {
+      const url = reference.imageUrl ?? reference.sourceImageUrl;
+
+      return url
+        ? {
+            url,
+            sourcePageUrl: reference.sourcePageUrl,
+            sourceTitle: reference.sourceTitle,
+            referenceId: `assistant-ref-${index + 1}`
+          }
+        : undefined;
+    })
+    .filter((image): image is CapturedImage => Boolean(image));
+}
+
+function readAssistantDraftState(): AssistantDraftState | undefined {
+  const record = readStorageRecord(ASSISTANT_DRAFT_STORAGE_KEY);
+
+  if (!record) {
+    return undefined;
+  }
+
+  return {
+    engine: readAssistantEngineValue(record.engine),
+    mode: readAssistantModeValue(record.mode),
+    idea: readStringValue(record.idea),
+    aspectRatio: readAspectRatioValue(record.aspectRatio),
+    resolution: readResolutionValue(record.resolution),
+    renderQuality: readRenderQualityValue(record.renderQuality),
+    rawEnabled: readBooleanValue(record.rawEnabled, true),
+    stylize: readNumberValue(record.stylize, 120),
+    isStylizeDirty: readBooleanValue(record.isStylizeDirty, false),
+    chaos: readNumberValue(record.chaos, 0),
+    weird: readNumberValue(record.weird, 0),
+    seed: readStringValue(record.seed),
+    negativePrompt: readStringValue(record.negativePrompt),
+    personalizationCode: readStringValue(record.personalizationCode),
+    identityLock: readBooleanValue(record.identityLock, false),
+    photoshopTargetStageId: readPhotoshopStageValue(record.photoshopTargetStageId),
+    extraSpecs: readStringValue(record.extraSpecs),
+    reverseContext: readStoredReverseContext(record.reverseContext),
+    result: readStoredAssistantResult(record.result)
+  };
+}
+
+function writeAssistantDraftState(draft: AssistantDraftState) {
+  writeStorageRecord(ASSISTANT_DRAFT_STORAGE_KEY, draft);
+}
+
+function readMjParameterPresets(): MjParameterPreset[] {
+  const value = readStorageValue(MJ_PARAMETER_PRESETS_STORAGE_KEY);
+
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map(readStoredMjPreset)
+    .filter((preset): preset is MjParameterPreset => Boolean(preset))
+    .slice(0, MAX_MJ_PARAMETER_PRESETS);
+}
+
+function writeMjParameterPresets(presets: MjParameterPreset[]) {
+  writeStorageRecord(
+    MJ_PARAMETER_PRESETS_STORAGE_KEY,
+    presets.slice(0, MAX_MJ_PARAMETER_PRESETS)
+  );
+}
+
+function readStoredMjPreset(value: unknown): MjParameterPreset | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const name = readStringValue(value.name).trim();
+
+  if (!name) {
+    return undefined;
+  }
+
+  return {
+    id: readStringValue(value.id) || createPresetId(),
+    name,
+    createdAt: readStringValue(value.createdAt) || new Date().toISOString(),
+    aspectRatio: normalizeAssistantAspectRatio(value.aspectRatio),
+    renderQuality: readRenderQualityValue(value.renderQuality),
+    rawEnabled: readBooleanValue(value.rawEnabled, true),
+    stylize: readNumberValue(value.stylize, 120),
+    chaos: readNumberValue(value.chaos, 0),
+    weird: readNumberValue(value.weird, 0),
+    seed: readStringValue(value.seed),
+    personalizationCode: readStringValue(value.personalizationCode),
+    negativePrompt: readStringValue(value.negativePrompt)
+  };
+}
+
+function readStoredAssistantResult(
+  value: unknown
+): AssistantPromptResult | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const brief = readStringValue(value.brief);
+  const finalPrompt = readStringValue(value.finalPrompt);
+
+  if (!brief && !finalPrompt) {
+    return null;
+  }
+
+  const chineseCheck = readStoredChineseCheck(value.chineseCheck);
+
+  return {
+    brief,
+    finalPrompt,
+    questions: readStringArray(value.questions),
+    assumptions: readStringArray(value.assumptions),
+    negativeConstraints: readStringArray(value.negativeConstraints),
+    ...(chineseCheck ? { chineseCheck } : {})
+  };
+}
+
+function readStoredChineseCheck(
+  value: unknown
+): AssistantPromptResult["chineseCheck"] {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  return {
+    backTranslation: readStringValue(value.backTranslation),
+    checklist: readStringArray(value.checklist),
+    possibleIssues: readStringArray(value.possibleIssues)
+  };
+}
+
+function readStoredReverseContext(
+  value: unknown
+): AssistantReverseContext | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const promptText = readStringValue(value.promptText);
+  const structuredJson = readStringValue(value.structuredJson);
+
+  if (!promptText && !structuredJson) {
+    return undefined;
+  }
+
+  return {
+    sourceType: (readStringValue(value.sourceType) || "single") as AssistantReverseContext["sourceType"],
+    templateName: readStringValue(value.templateName) || undefined,
+    promptText,
+    negativePrompt: readStringValue(value.negativePrompt) || undefined,
+    structuredJson,
+    fields: readStoredReverseFields(value.fields)
+  };
+}
+
+function readStoredReverseFields(
+  value: unknown
+): AssistantReverseContext["fields"] {
+  if (!isRecord(value)) {
+    return {};
+  }
+
+  const fields: AssistantReverseContext["fields"] = {};
+  const keys: Array<keyof AssistantReverseContext["fields"]> = [
+    "subject",
+    "style",
+    "lighting",
+    "color",
+    "composition",
+    "camera",
+    "mood",
+    "quality"
+  ];
+
+  keys.forEach((key) => {
+    const fieldValue = cleanReverseContextText(readStringValue(value[key]));
+
+    if (fieldValue) {
+      fields[key] = fieldValue;
+    }
+  });
+
+  return fields;
+}
+
+function readStorageRecord(key: string): Record<string, unknown> | undefined {
+  const value = readStorageValue(key);
+  return isRecord(value) ? value : undefined;
+}
+
+function readStorageValue(key: string): unknown {
+  if (typeof window === "undefined") {
+    return undefined;
+  }
+
+  try {
+    const rawValue = window.localStorage.getItem(key);
+    return rawValue ? JSON.parse(rawValue) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeStorageRecord(key: string, value: unknown) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Local storage can be unavailable or full inside extension contexts.
+  }
+}
+
+function readStringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function readStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function readBooleanValue(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function readNumberValue(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function readAssistantEngineValue(value: unknown): AssistantEngine {
+  return value === "midjourney-v8.1" ? "midjourney-v8.1" : "nano-banana-pro";
+}
+
+function readAssistantModeValue(value: unknown): AssistantPromptMode {
+  return isOneOf(value, ["auto", "text-to-image", "image-and-text", "editing"] as const)
+    ? value
+    : "auto";
+}
+
+function getAspectRatioPresetValue(
+  value: AssistantAspectRatio
+): AssistantAspectRatioPreset | "" {
+  return isOneOf(value, ASPECT_RATIOS) ? value : "";
+}
+
+function getFixedAspectRatioValue(
+  value: AssistantAspectRatio
+): AssistantAspectRatioPreset {
+  return getAspectRatioPresetValue(value) || "16:9";
+}
+
+function getAssistantAspectRatioForEngine(
+  engine: AssistantEngine,
+  value: AssistantAspectRatio
+): AssistantAspectRatio {
+  if (engine === "midjourney-v8.1") {
+    return normalizeAssistantAspectRatio(value) ?? "16:9";
+  }
+
+  return getFixedAspectRatioValue(value);
+}
+
+function readAspectRatioValue(value: unknown): AssistantAspectRatio {
+  return normalizeAssistantAspectRatio(value) ?? "16:9";
+}
+
+function readResolutionValue(value: unknown): AssistantResolution {
+  return isOneOf(value, RESOLUTIONS) ? value : "2K";
+}
+
+function readRenderQualityValue(value: unknown): AssistantRenderQuality {
+  return value === "sd" ? "sd" : "hd";
+}
+
+function readPhotoshopStageValue(value: unknown): PhotoshopTargetStageId {
+  return PHOTOSHOP_TARGET_STAGES.some((stage) => stage.value === value)
+    ? (value as PhotoshopTargetStageId)
+    : "";
+}
+
+function isOneOf<T extends string>(
+  value: unknown,
+  values: readonly T[]
+): value is T {
+  return typeof value === "string" && values.includes(value as T);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function getDefaultReferenceRole(index: number): AssistantReferenceRole {
   return index === 0 ? "identity" : "style";
 }
@@ -1447,15 +2533,21 @@ function getMidjourneyStylizePreset(
   aspectRatio: AssistantAspectRatio,
   renderQuality: AssistantRenderQuality
 ): number {
+  const normalizedAspectRatio = normalizeAssistantAspectRatio(aspectRatio) ?? "16:9";
+
   if (renderQuality === "sd") {
     return 150;
   }
 
-  if (aspectRatio === "4:5") {
+  if (normalizedAspectRatio === "4:5") {
     return 80;
   }
 
-  if (aspectRatio === "21:9" || aspectRatio === "3:4" || aspectRatio === "2:3") {
+  if (
+    normalizedAspectRatio === "21:9" ||
+    normalizedAspectRatio === "3:4" ||
+    normalizedAspectRatio === "2:3"
+  ) {
     return 150;
   }
 

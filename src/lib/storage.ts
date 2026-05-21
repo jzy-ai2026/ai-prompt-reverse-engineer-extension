@@ -17,16 +17,20 @@ import type {
   AssistantEngine,
   AssistantPromptInput,
   AssistantPromptResult,
+  AssistantReverseContext,
   AssistantRenderQuality
 } from "./openaiClient";
+import { normalizeAssistantAspectRatio } from "./openaiClient";
 
 const SETTINGS_KEY = "settings";
 const PRIVACY_CONSENT_KEY = "privacyConsent";
 const HISTORY_KEY = "promptHistory";
 const ASSISTANT_HISTORY_KEY = "assistantHistory";
+const ASSISTANT_FAVORITES_KEY = "assistantFavorites";
 const CUSTOM_PROMPT_TEMPLATES_KEY = "customPromptTemplates";
 const MAX_HISTORY_ITEMS = 20;
 const MAX_ASSISTANT_HISTORY_ITEMS = 20;
+const MAX_ASSISTANT_FAVORITE_ITEMS = 100;
 const MAX_HISTORY_REFERENCE_IMAGES = 6;
 const MAX_HISTORY_INLINE_IMAGE_BYTES = 120_000;
 
@@ -82,6 +86,18 @@ export type StoredAssistantPromptInput = Omit<
 export interface AssistantHistoryItem {
   id: string;
   createdAt: string;
+  summaryTitle: string;
+  summarySubtitle: string;
+  input: StoredAssistantPromptInput;
+  result: AssistantPromptResult;
+  referenceImages?: HistoryReferenceImage[];
+}
+
+export interface AssistantFavoriteItem {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  name: string;
   summaryTitle: string;
   summarySubtitle: string;
   input: StoredAssistantPromptInput;
@@ -327,6 +343,87 @@ export async function clearAssistantHistory(): Promise<void> {
   await storageSet({ [ASSISTANT_HISTORY_KEY]: [] });
 }
 
+export async function getAssistantFavorites(): Promise<AssistantFavoriteItem[]> {
+  const stored = await storageGet<{ [ASSISTANT_FAVORITES_KEY]?: unknown[] }>(
+    ASSISTANT_FAVORITES_KEY
+  );
+  const favorites = stored[ASSISTANT_FAVORITES_KEY] ?? [];
+  const normalizedFavorites = favorites
+    .filter(isAssistantFavoriteItem)
+    .slice(0, MAX_ASSISTANT_FAVORITE_ITEMS)
+    .map(normalizeAssistantFavoriteItem);
+
+  if (
+    favorites.length !== normalizedFavorites.length ||
+    containsInlineImageDataUrl(favorites)
+  ) {
+    await storageSet({ [ASSISTANT_FAVORITES_KEY]: normalizedFavorites });
+  }
+
+  return normalizedFavorites;
+}
+
+export async function addAssistantFavoriteItem(input: {
+  name?: string;
+  input: StoredAssistantPromptInput;
+  result: AssistantPromptResult;
+  referenceImages?: HistoryReferenceImage[];
+}): Promise<AssistantFavoriteItem[]> {
+  const existing = await getAssistantFavorites();
+  const referenceImages = normalizeHistoryReferenceImages(input.referenceImages ?? []);
+  const normalizedInput = normalizeStoredAssistantInput(input.input, referenceImages);
+  const result = normalizeStoredAssistantResult(input.result);
+  const summary = createAssistantHistorySummary(normalizedInput, result);
+  const favoriteKey = createAssistantFavoriteKey(normalizedInput, result);
+  const previous = existing.find(
+    (item) => createAssistantFavoriteKey(item.input, item.result) === favoriteKey
+  );
+  const now = new Date().toISOString();
+  const name =
+    truncateText(
+      input.name?.trim() ||
+        previous?.name ||
+        result.brief ||
+        summary.title ||
+        "收藏提示词",
+      64
+    ) || "收藏提示词";
+  const item: AssistantFavoriteItem = {
+    id: previous?.id ?? createHistoryId(),
+    createdAt: previous?.createdAt ?? now,
+    updatedAt: now,
+    name,
+    summaryTitle: summary.title,
+    summarySubtitle: summary.subtitle,
+    input: normalizedInput,
+    result,
+    referenceImages
+  };
+  const next = [
+    item,
+    ...existing.filter(
+      (current) =>
+        createAssistantFavoriteKey(current.input, current.result) !== favoriteKey
+    )
+  ].slice(0, MAX_ASSISTANT_FAVORITE_ITEMS);
+
+  await storageSet({ [ASSISTANT_FAVORITES_KEY]: next });
+  return next;
+}
+
+export async function removeAssistantFavoriteItem(
+  id: string
+): Promise<AssistantFavoriteItem[]> {
+  const existing = await getAssistantFavorites();
+  const next = existing.filter((item) => item.id !== id);
+  await storageSet({ [ASSISTANT_FAVORITES_KEY]: next });
+  return next;
+}
+
+export async function clearAssistantFavorites(): Promise<void> {
+  await storageSet({ [ASSISTANT_FAVORITES_KEY]: [] });
+}
+
 export async function getPromptTemplates(): Promise<PromptTemplate[]> {
   const stored = await storageGet<{
     [CUSTOM_PROMPT_TEMPLATES_KEY]?: unknown[];
@@ -528,6 +625,19 @@ function isAssistantHistoryItem(value: unknown): value is AssistantHistoryItem {
   );
 }
 
+function isAssistantFavoriteItem(value: unknown): value is AssistantFavoriteItem {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return (
+    typeof value.id === "string" &&
+    typeof value.createdAt === "string" &&
+    isRecord(value.input) &&
+    isRecord(value.result)
+  );
+}
+
 function normalizeAssistantHistoryItem(
   item: AssistantHistoryItem
 ): AssistantHistoryItem {
@@ -538,6 +648,26 @@ function normalizeAssistantHistoryItem(
 
   return {
     ...item,
+    summaryTitle: item.summaryTitle || summary.title,
+    summarySubtitle: item.summarySubtitle || summary.subtitle,
+    input,
+    result,
+    referenceImages
+  };
+}
+
+function normalizeAssistantFavoriteItem(
+  item: AssistantFavoriteItem
+): AssistantFavoriteItem {
+  const referenceImages = normalizeHistoryReferenceImages(item.referenceImages ?? []);
+  const input = normalizeStoredAssistantInput(item.input, referenceImages);
+  const result = normalizeStoredAssistantResult(item.result);
+  const summary = createAssistantHistorySummary(input, result);
+
+  return {
+    ...item,
+    updatedAt: readOptionalString(item.updatedAt) ?? item.createdAt,
+    name: truncateText(item.name || result.brief || summary.title, 64) || "收藏提示词",
     summaryTitle: item.summaryTitle || summary.title,
     summarySubtitle: item.summarySubtitle || summary.subtitle,
     input,
@@ -587,6 +717,7 @@ function normalizeStoredAssistantInput(
     aspectRatio: readAssistantAspectRatio(record.aspectRatio),
     resolution: readAssistantResolution(record.resolution),
     identityLock: Boolean(record.identityLock),
+    reverseContext: normalizeStoredAssistantReverseContext(record.reverseContext),
     extraSpecs: readOptionalString(record.extraSpecs),
     rawEnabled:
       typeof record.rawEnabled === "boolean" ? record.rawEnabled : undefined,
@@ -598,6 +729,53 @@ function normalizeStoredAssistantInput(
     negativePrompt: readOptionalString(record.negativePrompt),
     personalizationCode: readOptionalString(record.personalizationCode)
   };
+}
+
+function normalizeStoredAssistantReverseContext(
+  value: unknown
+): AssistantReverseContext | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const promptText = readOptionalString(value.promptText);
+  const structuredJson = readOptionalString(value.structuredJson);
+
+  if (!promptText && !structuredJson) {
+    return undefined;
+  }
+
+  return {
+    sourceType: readAssistantReverseSourceType(value.sourceType),
+    templateName: readOptionalString(value.templateName),
+    promptText: promptText ?? "",
+    negativePrompt: readOptionalString(value.negativePrompt),
+    structuredJson: structuredJson ?? "",
+    fields: normalizeStoredAssistantReverseFields(value.fields)
+  };
+}
+
+function normalizeStoredAssistantReverseFields(
+  value: unknown
+): AssistantReverseContext["fields"] {
+  if (!isRecord(value)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    [
+      "subject",
+      "style",
+      "lighting",
+      "color",
+      "composition",
+      "camera",
+      "mood",
+      "quality"
+    ]
+      .map((key) => [key, readOptionalString(value[key])] as const)
+      .filter((entry): entry is readonly [string, string] => Boolean(entry[1]))
+  ) as AssistantReverseContext["fields"];
 }
 
 function normalizeStoredAssistantResult(value: unknown): AssistantPromptResult {
@@ -686,6 +864,13 @@ function createAssistantHistorySummary(
   return { title, subtitle };
 }
 
+function createAssistantFavoriteKey(
+  input: StoredAssistantPromptInput,
+  result: AssistantPromptResult
+): string {
+  return `${input.engine}\n${result.finalPrompt.replace(/\s+/g, " ").trim()}`;
+}
+
 function readAssistantEngine(value: unknown): AssistantEngine {
   return isOneOf(value, ["nano-banana-pro", "midjourney-v8.1"])
     ? value
@@ -717,26 +902,21 @@ function readAssistantReferenceRole(
 function readAssistantAspectRatio(
   value: unknown
 ): StoredAssistantPromptInput["aspectRatio"] {
-  return isOneOf(value, [
-    "1:1",
-    "2:3",
-    "3:2",
-    "3:4",
-    "4:3",
-    "4:5",
-    "5:4",
-    "9:16",
-    "16:9",
-    "21:9"
-  ])
-    ? value
-    : "16:9";
+  return normalizeAssistantAspectRatio(value) ?? "16:9";
 }
 
 function readAssistantResolution(
   value: unknown
 ): StoredAssistantPromptInput["resolution"] {
   return isOneOf(value, ["1K", "2K", "4K"]) ? value : "2K";
+}
+
+function readAssistantReverseSourceType(
+  value: unknown
+): AssistantReverseContext["sourceType"] {
+  return isOneOf(value, ["single", "batch", "style_common", "mix"])
+    ? value
+    : "single";
 }
 
 function readAssistantRenderQuality(

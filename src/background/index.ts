@@ -25,13 +25,18 @@ import {
 import {
   addHistoryItem,
   addAssistantHistoryItem,
+  addAssistantFavoriteItem,
   clearAssistantHistory,
+  clearAssistantFavorites,
   getPrivacyConsent,
   getAssistantHistory,
+  getAssistantFavorites,
   getSelectedPromptTemplate,
   getSettings,
   removeAssistantHistoryItem,
+  removeAssistantFavoriteItem,
   savePrivacyConsent,
+  type AssistantFavoriteItem,
   type AssistantHistoryItem,
   type HistoryReferenceImage,
   type PromptHistoryItem
@@ -152,6 +157,16 @@ type RuntimeRequest =
   | { type: "panel:get-assistant-history" }
   | { type: "panel:remove-assistant-history"; id: string }
   | { type: "panel:clear-assistant-history" }
+  | { type: "panel:get-assistant-favorites" }
+  | {
+      type: "panel:add-assistant-favorite";
+      name?: string;
+      input: AssistantPromptInput;
+      result: AssistantPromptResult;
+      referenceImages?: HistoryReferenceImage[];
+    }
+  | { type: "panel:remove-assistant-favorite"; id: string }
+  | { type: "panel:clear-assistant-favorites" }
   | {
       type: "panel:send-assistant-to-photoshop";
       input: AssistantPromptInput;
@@ -354,6 +369,28 @@ async function handleRuntimeMessage(message: RuntimeRequest): Promise<unknown> {
 
     case "panel:clear-assistant-history":
       await clearAssistantHistory();
+      return [];
+
+    case "panel:get-assistant-favorites":
+      return getAssistantFavorites();
+
+    case "panel:add-assistant-favorite": {
+      const { signal: _signal, onProgress: _onProgress, ...storedInput } =
+        message.input;
+
+      return addAssistantFavoriteItem({
+        name: message.name,
+        input: storedInput,
+        result: message.result,
+        referenceImages: message.referenceImages
+      }) satisfies Promise<AssistantFavoriteItem[]>;
+    }
+
+    case "panel:remove-assistant-favorite":
+      return removeAssistantFavoriteItem(message.id);
+
+    case "panel:clear-assistant-favorites":
+      await clearAssistantFavorites();
       return [];
 
     case "panel:send-assistant-to-photoshop":

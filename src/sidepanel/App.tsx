@@ -26,6 +26,7 @@ import {
   getPromptTemplates,
   getSettings,
   saveSettings,
+  type AssistantFavoriteItem,
   type AssistantHistoryItem,
   type ExtensionSettings,
   type HistoryReferenceImage,
@@ -33,8 +34,10 @@ import {
 } from "../lib/storage";
 import type {
   AssistantPromptInput,
-  AssistantPromptResult
+  AssistantPromptResult,
+  AssistantReverseContext
 } from "../lib/openaiClient";
+import { createAssistantReverseContextFromDocument } from "../lib/openaiClient";
 import type { PromptTemplate } from "../lib/promptTemplates";
 import { HistoryList } from "./components/HistoryList";
 import { ImagePreview } from "./components/ImagePreview";
@@ -172,6 +175,9 @@ export function App() {
   const [jsonText, setJsonText] = useState("");
   const [history, setHistory] = useState<PromptHistoryItem[]>([]);
   const [mixImages, setMixImages] = useState<CapturedImage[]>([]);
+  const [assistantReverseContext, setAssistantReverseContext] = useState<
+    AssistantReverseContext | undefined
+  >();
   const [activeReferenceImages, setActiveReferenceImages] = useState<
     HistoryReferenceImage[]
   >([]);
@@ -657,6 +663,64 @@ export function App() {
     });
   }, []);
 
+  const getAssistantPromptFavorites = useCallback(async () => {
+    if (!hasExtensionRuntime()) {
+      return [] satisfies AssistantFavoriteItem[];
+    }
+
+    return sendRuntimeMessage<AssistantFavoriteItem[]>({
+      type: "panel:get-assistant-favorites"
+    });
+  }, []);
+
+  const addAssistantPromptFavorite = useCallback(
+    async (
+      name: string,
+      input: AssistantPromptInput,
+      result: AssistantPromptResult,
+      referenceImages?: HistoryReferenceImage[]
+    ) => {
+      if (!hasExtensionRuntime()) {
+        return [] satisfies AssistantFavoriteItem[];
+      }
+
+      return sendRuntimeMessage<AssistantFavoriteItem[]>({
+        type: "panel:add-assistant-favorite",
+        name,
+        input,
+        result,
+        referenceImages
+      });
+    },
+    []
+  );
+
+  const removeAssistantPromptFavorite = useCallback(async (id: string) => {
+    if (!hasExtensionRuntime()) {
+      return [] satisfies AssistantFavoriteItem[];
+    }
+
+    return sendRuntimeMessage<AssistantFavoriteItem[]>({
+      type: "panel:remove-assistant-favorite",
+      id
+    });
+  }, []);
+
+  const clearAssistantPromptFavorites = useCallback(async () => {
+    if (!hasExtensionRuntime()) {
+      return;
+    }
+
+    await sendRuntimeMessage<AssistantFavoriteItem[]>({
+      type: "panel:clear-assistant-favorites"
+    });
+  }, []);
+
+  const useCurrentReverseContextInAssistant = useCallback(() => {
+    setAssistantReverseContext(createAssistantReverseContextFromDocument(document));
+    setViewMode("assistant");
+  }, [document]);
+
   const sendAssistantPromptToPhotoshop = useCallback(
     async (
       input: AssistantPromptInput,
@@ -903,6 +967,11 @@ export function App() {
                   document={document}
                   onSave={saveCurrentToHistory}
                   isSaving={isSavingHistory}
+                  onUseInAssistant={useCurrentReverseContextInAssistant}
+                  canUseInAssistant={
+                    document.source.images.length > 0 ||
+                    document.template_output !== undefined
+                  }
                 />
               ) : (
                 <JsonEditor
@@ -933,14 +1002,20 @@ export function App() {
       {viewMode === "assistant" && (
         <NanoBananaAssistant
           mixImages={mixImages}
+          reverseContext={assistantReverseContext}
           disabled={isBusy}
           onGenerate={generateAssistantPrompt}
           onGetHistory={getAssistantPromptHistory}
           onRemoveHistory={removeAssistantPromptHistory}
           onClearHistory={clearAssistantPromptHistory}
+          onGetFavorites={getAssistantPromptFavorites}
+          onAddFavorite={addAssistantPromptFavorite}
+          onRemoveFavorite={removeAssistantPromptFavorite}
+          onClearFavorites={clearAssistantPromptFavorites}
           onAddReferenceImages={addMixImages}
           onSetReferenceImages={setMixImageQueue}
           onClearReferenceImages={clearMixImages}
+          onReverseContextChange={setAssistantReverseContext}
           onSendToPhotoshop={sendAssistantPromptToPhotoshop}
         />
       )}

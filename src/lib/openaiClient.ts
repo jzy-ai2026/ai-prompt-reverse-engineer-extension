@@ -1,7 +1,10 @@
 import { createAppError, isAppError } from "./errors";
 import {
+  createPromptPreviewText,
+  createStructuredJsonText,
   normalizePromptDocument,
   type NormalizePromptDocumentOptions,
+  type PromptFieldKey,
   type PromptSourceType,
   type SourceImage,
   type PromptDocument
@@ -99,17 +102,7 @@ export type AssistantReferenceRole =
   | "text"
   | "material";
 
-export type AssistantAspectRatio =
-  | "1:1"
-  | "2:3"
-  | "3:2"
-  | "3:4"
-  | "4:3"
-  | "4:5"
-  | "5:4"
-  | "9:16"
-  | "16:9"
-  | "21:9";
+export type AssistantAspectRatio = string;
 
 export type AssistantResolution = "1K" | "2K" | "4K";
 
@@ -124,6 +117,15 @@ export interface AssistantPromptReference {
   role: AssistantReferenceRole;
 }
 
+export interface AssistantReverseContext {
+  sourceType: PromptSourceType;
+  templateName?: string;
+  promptText: string;
+  negativePrompt?: string;
+  structuredJson: string;
+  fields: Partial<Record<PromptFieldKey, string>>;
+}
+
 export interface AssistantPromptInput {
   engine: AssistantEngine;
   mode: AssistantPromptMode;
@@ -132,6 +134,7 @@ export interface AssistantPromptInput {
   aspectRatio: AssistantAspectRatio;
   resolution: AssistantResolution;
   identityLock: boolean;
+  reverseContext?: AssistantReverseContext;
   extraSpecs?: string;
   rawEnabled?: boolean;
   renderQuality?: AssistantRenderQuality;
@@ -143,6 +146,31 @@ export interface AssistantPromptInput {
   personalizationCode?: string;
   signal?: AbortSignal;
   onProgress?: (event: ApiProgressEvent) => void;
+}
+
+const ASSISTANT_ASPECT_RATIO_PATTERN = /^[1-9]\d{0,4}:[1-9]\d{0,4}$/;
+
+export function normalizeAssistantAspectRatioText(value: string): string {
+  return value
+    .trim()
+    .replace(/[０-９]/g, (char) =>
+      String.fromCharCode(char.charCodeAt(0) - 0xfee0)
+    )
+    .replace(/[：／/×xX]/g, ":")
+    .replace(/\s+/g, "");
+}
+
+export function normalizeAssistantAspectRatio(
+  value: unknown
+): AssistantAspectRatio | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const normalized = normalizeAssistantAspectRatioText(value);
+  return ASSISTANT_ASPECT_RATIO_PATTERN.test(normalized)
+    ? normalized
+    : undefined;
 }
 
 export interface AssistantChineseCheck {
@@ -230,6 +258,8 @@ const NANO_BANANA_ASSISTANT_SYSTEM_PROMPT = [
   "The final prompt must explicitly cover subject, action, location, style, composition, camera or lens, focus, lighting, color grading, materials, textures, mood, reference-image roles, text rendering when relevant, aspect ratio, and resolution.",
   "If the user asks for edits, write precise editing instructions: what changes, what stays locked, and what must not be redrawn.",
   "If references are provided, name them as Image 1, Image 2, etc. and state their role. Never blend identity, background, style, product, and text roles accidentally.",
+  "If reverseContext is provided, treat it as a reverse-engineered visual brief. Preserve its style, composition, camera, lighting, color, material, mood, and negative constraints while still following the user's new idea.",
+  "If the user idea is empty and reverseContext is provided, create a reusable prompt that continues the reverse-engineered style and composition instead of asking for more input.",
   "If identityLock is true, preserve bone structure, eye distance, jawline geometry, age, skin texture, and facial proportions. Include DO NOT beautify, DO NOT alter age, and DO NOT change facial proportions.",
   "For charts, infographics, UI, labels, or any factual visual, do not invent facts. Say that all data and exact text must come from user-provided input.",
   "Any visible text in the image must be quoted and include font style, position, size, and treatment.",
@@ -247,6 +277,8 @@ const MIDJOURNEY_V81_ASSISTANT_SYSTEM_PROMPT = [
   "Turn the user's Chinese or mixed-language idea into one polished English Midjourney prompt.",
   "Follow the local Midjourney V8.1 guide: use full visual sentences, not a loose keyword pile.",
   "The prompt body must clearly cover subject, action or relationship, environment, era, composition, camera or lens, lighting, atmosphere, material or texture details, and visual target.",
+  "If reverseContext is provided, translate it into concrete photography and film language. Use its style, composition, camera, lighting, color, mood, and material cues, but do not rigidly copy the original subject unless the user asks for it.",
+  "If the user idea is empty and reverseContext is provided, create a reusable Midjourney prompt that continues the reverse-engineered visual style and composition.",
   "Translate vague Chinese words into concrete photography and film language. Examples: 好看的光 -> soft backlight, rim light, volumetric fog; 真实感 -> shot on Hasselblad X2D 100C, medium format photography, realistic material texture.",
   "V8.1 requires --v 8.1 at the end of the prompt. Parameters must appear only at the very end, after all descriptive text.",
   "Use --raw for realistic photography, film stills, AAA game screenshots, architecture, product photography, or complex literal scene control unless the user explicitly asks for a strongly stylized illustration.",
@@ -285,6 +317,60 @@ const MIDJOURNEY_PARAMETER_PATTERNS = [
   /\s--sw\s+(?!--)\S+/gi,
   /\s--no\s+[\s\S]*?(?=\s--[a-z]|\s*$)/gi
 ];
+
+const REVERSE_CONTEXT_FIELD_KEYS: PromptFieldKey[] = [
+  "subject",
+  "style",
+  "lighting",
+  "color",
+  "composition",
+  "camera",
+  "mood",
+  "quality"
+];
+
+export function createAssistantReverseContextFromDocument(
+  document: PromptDocument
+): AssistantReverseContext {
+  const fields = REVERSE_CONTEXT_FIELD_KEYS.reduce<
+    Partial<Record<PromptFieldKey, string>>
+  >((output, key) => {
+    const field = document.prompt[key];
+    const description = field?.description?.trim();
+
+    if (description && field.confidence > 0 && isMeaningfulReverseContextText(description)) {
+      output[key] = description;
+    }
+
+    return output;
+  }, {});
+
+  return {
+    sourceType: document.source.type,
+    templateName: document.template?.name,
+    promptText: createPromptPreviewText(document),
+    negativePrompt: document.negative_prompt.trim() || undefined,
+    structuredJson: createStructuredJsonText(document),
+    fields
+  };
+}
+
+function isMeaningfulReverseContextText(value: string): boolean {
+  const normalized = value.replace(/\s+/g, "").toLowerCase();
+
+  if (!normalized) {
+    return false;
+  }
+
+  return !(
+    normalized.startsWith("未识别") ||
+    normalized === "unknown" ||
+    normalized === "n/a" ||
+    normalized === "na" ||
+    normalized === "none" ||
+    normalized === "高质量，细节丰富".replace(/\s+/g, "").toLowerCase()
+  );
+}
 
 export async function analyzeImagePrompt(
   config: OpenAiGatewayConfig,
@@ -461,8 +547,11 @@ export async function generateNanoBananaAssistantPrompt(
 ): Promise<AssistantPromptResult> {
   validateConfig(config);
 
-  if (!input.idea.trim()) {
-    throw createAppError("missing_config", "Please describe what you want to create.");
+  if (!input.idea.trim() && !input.reverseContext) {
+    throw createAppError(
+      "missing_config",
+      "Please describe what you want to create or attach a reverse JSON context."
+    );
   }
 
   input.onProgress?.({
@@ -497,23 +586,30 @@ export async function generateNanoBananaAssistantPrompt(
 
   return input.engine === "midjourney-v8.1"
     ? normalizeMidjourneyAssistantResult(result, input)
-    : result;
+    : normalizeNanoBananaAssistantResult(result, input);
 }
 
 function createNanoBananaAssistantUserContent(
   input: AssistantPromptInput
 ): ChatContent {
+  const aspectRatio = normalizeAssistantAspectRatio(input.aspectRatio) ?? "16:9";
+  const reverseContextText = createAssistantReverseContextText(input.reverseContext);
+  const effectiveIdea =
+    input.idea.trim() ||
+    "Use the reverse-engineered JSON context as the main visual direction. Continue its style, composition, camera, lighting, color, material, mood, and negative constraints in a reusable new-image prompt.";
   const text = [
     "Create a Nano Banana Pro prompt from this request.",
     "",
     `Mode: ${input.mode}`,
-    `Aspect ratio: ${input.aspectRatio}`,
+    `Aspect ratio: ${aspectRatio}`,
     `Resolution: ${input.resolution}`,
     `Identity lock: ${input.identityLock ? "enabled" : "disabled"}`,
     input.extraSpecs?.trim() ? `Extra specs: ${input.extraSpecs.trim()}` : "",
     "",
     "User idea:",
-    input.idea.trim(),
+    effectiveIdea,
+    "",
+    reverseContextText,
     "",
     input.references.length
       ? [
@@ -531,7 +627,10 @@ function createNanoBananaAssistantUserContent(
       : "Reference images: none",
     "",
     "Return JSON only. Use finalPrompt for the polished English prompt that the user can copy directly into Nano Banana Pro.",
-    "Also return chineseCheck so the user can review the English prompt in Chinese: backTranslation, checklist, possibleIssues."
+    "Also return chineseCheck so the user can review the English prompt in Chinese: backTranslation, checklist, possibleIssues.",
+    input.reverseContext
+      ? "In chineseCheck, explicitly mention that the reverse-engineered JSON context was used for style, composition, camera, lighting, and color direction."
+      : ""
   ]
     .filter(Boolean)
     .join("\n");
@@ -557,15 +656,59 @@ function createNanoBananaAssistantUserContent(
   ];
 }
 
+function createAssistantReverseContextText(
+  context: AssistantReverseContext | undefined
+): string {
+  if (!context) {
+    return "Reverse-engineered JSON context: none";
+  }
+
+  const fieldLines = REVERSE_CONTEXT_FIELD_KEYS.map((key) => {
+    const value = context.fields[key]?.trim();
+
+    return value ? `${key}: ${value}` : "";
+  }).filter(Boolean);
+
+  return [
+    "Reverse-engineered JSON context:",
+    `Source type: ${context.sourceType}`,
+    context.templateName ? `Template: ${context.templateName}` : "",
+    context.promptText.trim() ? `Prompt text: ${context.promptText.trim()}` : "",
+    context.negativePrompt?.trim()
+      ? `Negative prompt: ${context.negativePrompt.trim()}`
+      : "",
+    fieldLines.length ? ["Fields:", ...fieldLines].join("\n") : "",
+    "Structured JSON:",
+    truncateForModelContext(context.structuredJson, 8000)
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function truncateForModelContext(value: string, maxLength: number): string {
+  const trimmed = value.trim();
+
+  if (trimmed.length <= maxLength) {
+    return trimmed;
+  }
+
+  return `${trimmed.slice(0, maxLength)}\n...[truncated]`;
+}
+
 function createMidjourneyAssistantUserContent(
   input: AssistantPromptInput
 ): ChatContent {
   const renderQuality = input.renderQuality ?? "hd";
+  const aspectRatio = normalizeAssistantAspectRatio(input.aspectRatio) ?? "1:1";
+  const reverseContextText = createAssistantReverseContextText(input.reverseContext);
+  const effectiveIdea =
+    input.idea.trim() ||
+    "Use the reverse-engineered JSON context as the main visual direction. Continue its style, composition, camera, lighting, color, material, and mood as a reusable Midjourney prompt. Do not rigidly copy the original subject unless it is essential to the style.";
   const text = [
     "Create a Midjourney V8.1 prompt from this request.",
     "",
     `Mode: ${input.mode}`,
-    `Aspect ratio: ${input.aspectRatio}`,
+    `Aspect ratio: ${aspectRatio}`,
     `Render quality: ${renderQuality}`,
     `Raw mode: ${input.rawEnabled === false ? "disabled" : "enabled"}`,
     `Stylize: ${normalizeInteger(input.stylize, getDefaultMidjourneyStylize(input))}`,
@@ -584,7 +727,9 @@ function createMidjourneyAssistantUserContent(
     input.extraSpecs?.trim() ? `Extra specs: ${input.extraSpecs.trim()}` : "",
     "",
     "User idea:",
-    input.idea.trim(),
+    effectiveIdea,
+    "",
+    reverseContextText,
     "",
     input.references.length
       ? [
@@ -612,7 +757,10 @@ function createMidjourneyAssistantUserContent(
     "1. finalPrompt must be one English Midjourney V8.1 prompt only, with all parameters at the end.",
     "2. Include --v 8.1. Do not include --q, --quality, --cref, --cw, --oref, --ow, --draft, --niji, or ::.",
     "3. If a local reference has no public URL, use placeholders like <image-1-url> instead of data URLs.",
-    "4. Return JSON only. Use chineseCheck to explain the prompt and parameter choices in Chinese."
+    "4. Return JSON only. Use chineseCheck to explain the prompt and parameter choices in Chinese.",
+    input.reverseContext
+      ? "5. In chineseCheck, explicitly mention that the reverse-engineered JSON context was used for style, composition, camera, lighting, and color direction."
+      : ""
   ]
     .filter(Boolean)
     .join("\n");
@@ -636,6 +784,52 @@ function createMidjourneyAssistantUserContent(
         }
       }))
   ];
+}
+
+function normalizeNanoBananaAssistantResult(
+  result: AssistantPromptResult,
+  input: AssistantPromptInput
+): AssistantPromptResult {
+  if (!input.reverseContext) {
+    return result;
+  }
+
+  const reverseContextChecks = [
+    "已使用反推 JSON 中的风格、构图、镜头、光影和色彩作为提示词方向。",
+    input.idea.trim()
+      ? "用户补充想法优先，反推 JSON 只作为视觉语言参考。"
+      : "未填写新想法，默认延续反推图的视觉语言生成可复用提示词。"
+  ];
+  const chineseCheck = result.chineseCheck
+    ? {
+        ...result.chineseCheck,
+        checklist: mergeUniqueStrings(
+          result.chineseCheck.checklist,
+          reverseContextChecks
+        )
+      }
+    : {
+        backTranslation: "已根据反推 JSON 的风格、构图、镜头、光影和色彩整理为 Nano Banana Pro 英文提示词。",
+        checklist: reverseContextChecks,
+        possibleIssues: []
+      };
+
+  const normalizedResult: AssistantPromptResult = {
+    ...result,
+    assumptions: mergeUniqueStrings(result.assumptions, [
+      input.idea.trim()
+        ? "反推 JSON 作为风格、构图和镜头参考，不强制复刻原图主体。"
+        : "未填写新想法，默认延续反推图的视觉风格、构图和镜头语言。"
+    ]),
+    negativeConstraints: mergeUniqueStrings(
+      result.negativeConstraints,
+      readNegativePromptItems(input.reverseContext.negativePrompt)
+    ),
+    chineseCheck
+  };
+
+  return normalizedResult;
+
 }
 
 function normalizeMidjourneyAssistantResult(
@@ -662,7 +856,7 @@ function normalizeMidjourneyAssistantResult(
         possibleIssues: warnings
       };
 
-  return {
+  const normalizedResult: AssistantPromptResult = {
     ...result,
     brief: result.brief || "Midjourney V8.1 提示词已生成",
     finalPrompt: sanitizedPrompt,
@@ -678,6 +872,23 @@ function normalizeMidjourneyAssistantResult(
       readNegativePromptItems(input.negativePrompt)
     ),
     chineseCheck
+  };
+
+  if (!input.reverseContext) {
+    return normalizedResult;
+  }
+
+  return {
+    ...normalizedResult,
+    assumptions: mergeUniqueStrings(normalizedResult.assumptions, [
+      input.idea.trim()
+        ? "反推 JSON 作为风格、构图和镜头参考，不强制复刻原图主体。"
+        : "未填写新想法，默认延续反推图的视觉风格、构图和镜头语言。"
+    ]),
+    negativeConstraints: mergeUniqueStrings(
+      normalizedResult.negativeConstraints,
+      readNegativePromptItems(input.reverseContext.negativePrompt)
+    )
   };
 }
 
@@ -707,7 +918,20 @@ function sanitizeMidjourneyFinalPrompt(
   );
   const promptBody = [referencePrefix, body].filter(Boolean).join(" ").trim();
 
-  return [promptBody || input.idea.trim(), suffix].filter(Boolean).join(" ").trim();
+  return [promptBody || createAssistantFallbackPrompt(input), suffix]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+}
+
+function createAssistantFallbackPrompt(input: AssistantPromptInput): string {
+  const reverseContextPrompt = input.reverseContext?.promptText?.trim();
+
+  if (reverseContextPrompt) {
+    return reverseContextPrompt;
+  }
+
+  return input.idea.trim();
 }
 
 function createMidjourneyImagePromptPrefix(input: AssistantPromptInput): string {
@@ -723,7 +947,8 @@ function createMidjourneyParameterSuffix(
   input: AssistantPromptInput,
   existingNegativePrompt: string
 ): string {
-  const parts = [`--ar ${input.aspectRatio}`, "--v 8.1"];
+  const aspectRatio = normalizeAssistantAspectRatio(input.aspectRatio) ?? "1:1";
+  const parts = [`--ar ${aspectRatio}`, "--v 8.1"];
 
   if (input.rawEnabled !== false) {
     parts.push("--raw");
@@ -774,7 +999,13 @@ function createMidjourneyParameterSuffix(
   }
 
   const negativePrompt = normalizeMidjourneyNegativePrompt(
-    [input.negativePrompt, existingNegativePrompt].filter(Boolean).join(", ")
+    [
+      input.negativePrompt,
+      input.reverseContext?.negativePrompt,
+      existingNegativePrompt
+    ]
+      .filter(Boolean)
+      .join(", ")
   );
 
   if (negativePrompt) {
@@ -785,8 +1016,9 @@ function createMidjourneyParameterSuffix(
 }
 
 function createMidjourneyChecklist(input: AssistantPromptInput): string[] {
+  const aspectRatio = normalizeAssistantAspectRatio(input.aspectRatio) ?? "1:1";
   const checklist = [
-    `画幅比例：${input.aspectRatio}`,
+    `画幅比例：${aspectRatio}`,
     "模型：已使用 --v 8.1",
     input.rawEnabled === false ? "Raw：未启用" : "Raw：已启用",
     input.renderQuality === "sd" ? "质量：SD 快速探索" : "质量：HD 定稿",
@@ -799,6 +1031,10 @@ function createMidjourneyChecklist(input: AssistantPromptInput): string[] {
 
   if (input.negativePrompt?.trim()) {
     checklist.push("负面参数：已整理到 --no。");
+  }
+
+  if (input.reverseContext) {
+    checklist.push("已带入反推 JSON 的风格、构图、镜头、光影和色彩方向。");
   }
 
   return checklist;
@@ -876,15 +1112,17 @@ function readNegativePromptItems(value: string | undefined): string[] {
 }
 
 function getDefaultMidjourneyStylize(input: AssistantPromptInput): number {
+  const aspectRatio = normalizeAssistantAspectRatio(input.aspectRatio) ?? "16:9";
+
   if (input.renderQuality === "sd") {
     return 150;
   }
 
-  if (input.aspectRatio === "4:5") {
+  if (aspectRatio === "4:5") {
     return 80;
   }
 
-  if (input.aspectRatio === "21:9") {
+  if (aspectRatio === "21:9") {
     return 150;
   }
 
@@ -913,13 +1151,19 @@ function isMidjourneyPlaceholderUrl(value: string): boolean {
 }
 
 function isAspectRatioWiderThan(value: AssistantAspectRatio, limit: number): boolean {
-  const [width, height] = value.split(":").map(Number);
+  const normalized = normalizeAssistantAspectRatio(value);
+
+  if (!normalized) {
+    return false;
+  }
+
+  const [width, height] = normalized.split(":").map(Number);
 
   if (!width || !height) {
     return false;
   }
 
-  return width / height > limit;
+  return Math.max(width / height, height / width) > limit;
 }
 
 async function requestAssistantPromptResult(

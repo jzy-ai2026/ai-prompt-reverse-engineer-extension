@@ -1,4 +1,4 @@
-import { Maximize2, SendHorizontal, X } from "lucide-react";
+import { Check, Maximize2, SendHorizontal, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Tooltip } from "./Tooltip";
 
@@ -37,30 +37,30 @@ const QUICK_ACTIONS: QuickAction[] = [
   {
     id: "replace-subject",
     label: "替换主体",
-    hint: "只改主体、物品、材质，不自动改光影、镜头、构图和场景。",
+    hint: "只替换主要对象、物品、角色或主体材质；不自动改镜头、构图和整体风格。",
     instruction: "替换主体或主体材质。",
-    boundary: "只允许修改主体、物品、材质、服装、道具等主体相关字段。"
+    boundary: "允许修改主体、物品、材质、服装、道具等主体相关字段；未选“重设场景”时不得主动改变环境。"
   },
   {
     id: "premium-texture",
-    label: "高级质感",
-    hint: "只提升材质、清晰度、细节密度和商业完成度。",
+    label: "提升质感",
+    hint: "提升材质、清晰度、细节密度和商业完成度；不改变主体和场景身份。",
     instruction: "提升为克制高级的商业摄影质感。",
     boundary: "只允许修改质感、清晰度、细节密度、材质可信度、商业完成度。"
   },
   {
     id: "reset-scene",
     label: "重设场景",
-    hint: "只改环境、地点和背景叙事，不替换主体身份。",
+    hint: "重设环境、地点、背景叙事和空间关系；不替换主体身份。",
     instruction: "重设场景或背景环境。",
     boundary: "只允许修改环境、地点、背景叙事、空间氛围。"
   },
   {
     id: "preserve-style",
-    label: "保留风格",
-    hint: "锁定原有风格、光影、色彩、镜头和构图。",
+    label: "锁定风格",
+    hint: "锁定风格、光影、色彩、镜头和构图。和“替换主体/重设场景”同时选择时，只保留视觉语言，不保留旧主体或旧场景。",
     instruction: "保留原图风格。",
-    boundary: "必须锁定原有风格、光影、色彩、镜头、构图和整体视觉语言。"
+    boundary: "必须锁定原有风格、光影、色彩、镜头、构图和整体视觉语言；如果同时选择替换主体或重设场景，锁定的是视觉语言，不是旧主体或旧场景内容。"
   }
 ];
 
@@ -207,24 +207,31 @@ export function InstructionInput({
         </Tooltip>
       </div>
 
-      <div className="quick-action-row" aria-label="常用修改意图">
-        {QUICK_ACTIONS.map((action) => (
-          <Tooltip content={action.hint} key={action.id}>
-            <button
-              className={
-                selectedActionIds.includes(action.id)
-                  ? "quick-action active"
-                  : "quick-action"
-              }
-              type="button"
-              aria-pressed={selectedActionIds.includes(action.id)}
-              onClick={() => toggleQuickAction(action.id)}
-              disabled={disabled || isSubmitting}
-            >
-              {action.label}
-            </button>
-          </Tooltip>
-        ))}
+      <div className="quick-action-panel">
+        <div className="quick-action-header">
+          <span>多选修改目标</span>
+          <small>可组合；“锁定风格”只锁视觉语言，不阻止已选择的主体/场景修改。</small>
+        </div>
+        <div className="quick-action-row" aria-label="常用修改意图，可多选">
+          {QUICK_ACTIONS.map((action) => {
+            const isSelected = selectedActionIds.includes(action.id);
+
+            return (
+              <Tooltip content={action.hint} key={action.id}>
+                <button
+                  className={isSelected ? "quick-action active" : "quick-action"}
+                  type="button"
+                  aria-pressed={isSelected}
+                  onClick={() => toggleQuickAction(action.id)}
+                  disabled={disabled || isSubmitting}
+                >
+                  {isSelected && <Check size={12} />}
+                  <span>{action.label}</span>
+                </button>
+              </Tooltip>
+            );
+          })}
+        </div>
       </div>
 
       {imageReferences.length > 0 && (
@@ -349,6 +356,7 @@ function buildStructuredInstruction(
       : "- 无",
     "",
     "【编辑边界】",
+    createQuickActionPriorityGuide(selectedActions),
     selectedActions.length
       ? selectedActions.map((action) => `- ${action.boundary}`).join("\n")
       : "- 只修改用户明确点名的内容。",
@@ -363,6 +371,26 @@ function buildStructuredInstruction(
   ];
 
   return lines.join("\n");
+}
+
+function createQuickActionPriorityGuide(selectedActions: QuickAction[]): string {
+  if (!selectedActions.length) {
+    return "- 未选择快捷目标，按用户文字指令执行，不主动扩展修改范围。";
+  }
+
+  const selectedIds = new Set(selectedActions.map((action) => action.id));
+  const notes = [
+    "- 快捷目标是多选约束，不是互斥单选；所有已选目标都必须同时满足。",
+    selectedIds.has("preserve-style") &&
+    (selectedIds.has("replace-subject") || selectedIds.has("reset-scene"))
+      ? "- 已选择“锁定风格”且同时选择内容修改：允许替换主体/重设场景，但必须保留原图的风格、构图、镜头、光影、色彩和整体氛围。"
+      : "",
+    selectedIds.has("replace-subject") && selectedIds.has("reset-scene")
+      ? "- 已同时选择“替换主体”和“重设场景”：主体和环境都可改，但不要额外改动未被点名的风格、镜头和色彩。"
+      : ""
+  ].filter(Boolean);
+
+  return notes.join("\n");
 }
 
 function resolveEditMode(
