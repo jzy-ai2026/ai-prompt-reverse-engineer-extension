@@ -13,6 +13,7 @@ export type AppErrorCode =
   | "image_compression_failed"
   | "image_too_large"
   | "privacy_denied"
+  | "photoshop_bridge_unavailable"
   | "unknown_error";
 
 export interface AppErrorDetails {
@@ -216,6 +217,15 @@ export function toUserFacingError(error: unknown): UserFacingError {
         title: "未授权上传",
         message: "你取消了图片/URL 上传授权，因此没有发送请求。",
         canRetry: false
+      };
+
+    case "photoshop_bridge_unavailable":
+      return {
+        code: appError.code,
+        title: "无法发送到 PS 插件",
+        message: "请确认 Photoshop Bridge 已启动，并检查设置里的 Bridge 地址。",
+        detail: createShortDetail(appError.details.responseText ?? appError.message),
+        canRetry: true
       };
 
     case "unknown_error":

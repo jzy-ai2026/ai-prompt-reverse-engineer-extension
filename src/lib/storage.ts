@@ -14,8 +14,10 @@ import {
   type PromptTemplate
 } from "./promptTemplates";
 import type {
+  AssistantEngine,
   AssistantPromptInput,
-  AssistantPromptResult
+  AssistantPromptResult,
+  AssistantRenderQuality
 } from "./openaiClient";
 
 const SETTINGS_KEY = "settings";
@@ -35,6 +37,10 @@ export const DEFAULT_API_BASE_URL =
 export const DEFAULT_MODEL =
   import.meta.env.VITE_DEFAULT_MODEL || "gemini-3.1-pro-preview-customtools";
 
+export const DEFAULT_PHOTOSHOP_BRIDGE_URL =
+  import.meta.env.VITE_DEFAULT_PHOTOSHOP_BRIDGE_URL ||
+  "http://127.0.0.1:8787";
+
 // Keep production bundles free of local development keys.
 const DEV_DEFAULT_API_KEY = import.meta.env.DEV
   ? import.meta.env.VITE_DEFAULT_API_KEY || ""
@@ -46,6 +52,7 @@ export interface ExtensionSettings {
   model: string;
   modelPresets: string[];
   selectedPromptTemplateId: string;
+  photoshopBridgeUrl: string;
 }
 
 export interface PrivacyConsent {
@@ -95,6 +102,8 @@ export interface HistoryReferenceImage {
 
 export const DEFAULT_MODEL_PRESETS = [
   "gemini-3.1-pro-preview-customtools",
+  "nanobanana2",
+  "nanobananapro",
   "gpt-4o",
   "gpt-4.1",
   "claude-sonnet-4",
@@ -107,7 +116,8 @@ export function getDefaultSettings(): ExtensionSettings {
     apiKey: DEV_DEFAULT_API_KEY,
     model: DEFAULT_MODEL,
     modelPresets: DEFAULT_MODEL_PRESETS,
-    selectedPromptTemplateId: DEFAULT_PROMPT_TEMPLATE_ID
+    selectedPromptTemplateId: DEFAULT_PROMPT_TEMPLATE_ID,
+    photoshopBridgeUrl: DEFAULT_PHOTOSHOP_BRIDGE_URL
   };
 }
 
@@ -124,12 +134,18 @@ export async function getSettings(): Promise<ExtensionSettings> {
     ),
     apiKey: readString(settings.apiKey, defaults.apiKey),
     model: readString(settings.model, defaults.model),
-    modelPresets: Array.isArray(settings.modelPresets)
-      ? settings.modelPresets.filter((item): item is string => typeof item === "string")
-      : defaults.modelPresets,
+    modelPresets: normalizeModelPresets(
+      Array.isArray(settings.modelPresets)
+        ? settings.modelPresets.filter((item): item is string => typeof item === "string")
+        : defaults.modelPresets,
+      readString(settings.model, defaults.model)
+    ),
     selectedPromptTemplateId: readString(
       settings.selectedPromptTemplateId,
       defaults.selectedPromptTemplateId
+    ),
+    photoshopBridgeUrl: normalizePhotoshopBridgeUrl(
+      readString(settings.photoshopBridgeUrl, defaults.photoshopBridgeUrl)
     )
   };
 }
@@ -149,7 +165,10 @@ export async function saveSettings(
       updates.model ?? current.model
     ),
     selectedPromptTemplateId:
-      updates.selectedPromptTemplateId ?? current.selectedPromptTemplateId
+      updates.selectedPromptTemplateId ?? current.selectedPromptTemplateId,
+    photoshopBridgeUrl: normalizePhotoshopBridgeUrl(
+      updates.photoshopBridgeUrl ?? current.photoshopBridgeUrl
+    )
   };
 
   await storageSet({ [SETTINGS_KEY]: next });
@@ -420,6 +439,20 @@ function normalizeApiBaseUrl(value: string): string {
   return trimmed.replace(/\/+$/, "");
 }
 
+function normalizePhotoshopBridgeUrl(value: string): string {
+  const trimmed = value.trim() || DEFAULT_PHOTOSHOP_BRIDGE_URL;
+
+  try {
+    const url = new URL(trimmed);
+    url.pathname = url.pathname.replace(/\/+$/, "");
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    return trimmed.replace(/\/+$/, "");
+  }
+}
+
 function normalizeModelPresets(values: string[], selectedModel: string): string[] {
   const unique = new Set(
     [...DEFAULT_MODEL_PRESETS, ...values, selectedModel]
@@ -521,6 +554,7 @@ function normalizeStoredAssistantInput(
   const references = Array.isArray(record.references) ? record.references : [];
 
   return {
+    engine: readAssistantEngine(record.engine),
     mode: readAssistantMode(record.mode),
     idea: readString(record.idea, ""),
     references: references
@@ -553,7 +587,16 @@ function normalizeStoredAssistantInput(
     aspectRatio: readAssistantAspectRatio(record.aspectRatio),
     resolution: readAssistantResolution(record.resolution),
     identityLock: Boolean(record.identityLock),
-    extraSpecs: readOptionalString(record.extraSpecs)
+    extraSpecs: readOptionalString(record.extraSpecs),
+    rawEnabled:
+      typeof record.rawEnabled === "boolean" ? record.rawEnabled : undefined,
+    renderQuality: readAssistantRenderQuality(record.renderQuality),
+    stylize: readOptionalNumber(record.stylize),
+    chaos: readOptionalNumber(record.chaos),
+    weird: readOptionalNumber(record.weird),
+    seed: readOptionalString(record.seed),
+    negativePrompt: readOptionalString(record.negativePrompt),
+    personalizationCode: readOptionalString(record.personalizationCode)
   };
 }
 
@@ -621,16 +664,32 @@ function createAssistantHistorySummary(
   result: AssistantPromptResult
 ): { title: string; subtitle: string } {
   const title = truncateText(
-    result.brief || input.idea || "Nano Banana Pro 提示词",
+    result.brief ||
+      input.idea ||
+      (input.engine === "midjourney-v8.1"
+        ? "Midjourney V8.1 提示词"
+        : "Nano Banana Pro 提示词"),
     42
   );
   const referenceCount = input.references.length;
   const modeLabel = input.mode === "editing" ? "改图" : "生图";
-  const subtitle = `${modeLabel} · ${input.aspectRatio} · ${input.resolution}${
+  const engineLabel =
+    input.engine === "midjourney-v8.1" ? "MJ V8.1" : "Nano Banana Pro";
+  const qualityLabel =
+    input.engine === "midjourney-v8.1"
+      ? (input.renderQuality ?? "hd").toUpperCase()
+      : input.resolution;
+  const subtitle = `${engineLabel} · ${modeLabel} · ${input.aspectRatio} · ${qualityLabel}${
     referenceCount ? ` · ${referenceCount} 图` : ""
   }`;
 
   return { title, subtitle };
+}
+
+function readAssistantEngine(value: unknown): AssistantEngine {
+  return isOneOf(value, ["nano-banana-pro", "midjourney-v8.1"])
+    ? value
+    : "nano-banana-pro";
 }
 
 function readAssistantMode(value: unknown): StoredAssistantPromptInput["mode"] {
@@ -678,6 +737,12 @@ function readAssistantResolution(
   value: unknown
 ): StoredAssistantPromptInput["resolution"] {
   return isOneOf(value, ["1K", "2K", "4K"]) ? value : "2K";
+}
+
+function readAssistantRenderQuality(
+  value: unknown
+): AssistantRenderQuality | undefined {
+  return isOneOf(value, ["sd", "hd"]) ? value : undefined;
 }
 
 function readOptionalStringArray(value: unknown): string[] {

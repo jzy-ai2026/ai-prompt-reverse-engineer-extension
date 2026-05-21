@@ -88,6 +88,8 @@ export type AssistantPromptMode =
   | "image-and-text"
   | "editing";
 
+export type AssistantEngine = "nano-banana-pro" | "midjourney-v8.1";
+
 export type AssistantReferenceRole =
   | "identity"
   | "style"
@@ -111,6 +113,8 @@ export type AssistantAspectRatio =
 
 export type AssistantResolution = "1K" | "2K" | "4K";
 
+export type AssistantRenderQuality = "sd" | "hd";
+
 export interface AssistantPromptReference {
   imageUrl?: string;
   sourceImageUrl?: string;
@@ -121,6 +125,7 @@ export interface AssistantPromptReference {
 }
 
 export interface AssistantPromptInput {
+  engine: AssistantEngine;
   mode: AssistantPromptMode;
   idea: string;
   references: AssistantPromptReference[];
@@ -128,6 +133,14 @@ export interface AssistantPromptInput {
   resolution: AssistantResolution;
   identityLock: boolean;
   extraSpecs?: string;
+  rawEnabled?: boolean;
+  renderQuality?: AssistantRenderQuality;
+  stylize?: number;
+  chaos?: number;
+  weird?: number;
+  seed?: string;
+  negativePrompt?: string;
+  personalizationCode?: string;
   signal?: AbortSignal;
   onProgress?: (event: ApiProgressEvent) => void;
 }
@@ -228,6 +241,50 @@ const NANO_BANANA_ASSISTANT_SYSTEM_PROMPT = [
   "chineseCheck.possibleIssues must list Chinese ambiguities the user may need to confirm. Use an empty array when there are none.",
   "questions, assumptions, and negativeConstraints must be arrays of short Simplified Chinese strings."
 ].join("\n");
+
+const MIDJOURNEY_V81_ASSISTANT_SYSTEM_PROMPT = [
+  "You are a professional Midjourney V8.1 prompt engineer and commercial photographer.",
+  "Turn the user's Chinese or mixed-language idea into one polished English Midjourney prompt.",
+  "Follow the local Midjourney V8.1 guide: use full visual sentences, not a loose keyword pile.",
+  "The prompt body must clearly cover subject, action or relationship, environment, era, composition, camera or lens, lighting, atmosphere, material or texture details, and visual target.",
+  "Translate vague Chinese words into concrete photography and film language. Examples: 好看的光 -> soft backlight, rim light, volumetric fog; 真实感 -> shot on Hasselblad X2D 100C, medium format photography, realistic material texture.",
+  "V8.1 requires --v 8.1 at the end of the prompt. Parameters must appear only at the very end, after all descriptive text.",
+  "Use --raw for realistic photography, film stills, AAA game screenshots, architecture, product photography, or complex literal scene control unless the user explicitly asks for a strongly stylized illustration.",
+  "Use --hd for final high-detail output and --sd for exploration. Never combine --hd and --sd.",
+  "Never output unsupported V8.1 parameters in finalPrompt: --q, --quality, --cref, --cw, --oref, --ow, --draft, or multi-prompt :: syntax.",
+  "Do not mix --niji 7 with --v 8.1.",
+  "Style references are allowed: use --sref URL --sw 100 unless the user asks for another style weight.",
+  "Image prompts are allowed: public image URLs can appear at the beginning of finalPrompt and may use --iw 1.",
+  "Never put a data URL, upload:// URL, or clipboard:// URL into finalPrompt. Use a clear placeholder such as <image-1-url> and explain in Chinese that the user must upload the image to Midjourney or Discord to get a usable URL.",
+  "If the user asks for character or product identity consistency, explain in Chinese that V8.1 does not support Character Reference or Omni Reference; use an image prompt, consistent text description, and fixed seed as weaker alternatives.",
+  "If visible English text is required, put the exact text in double quotation marks. Do not promise stable Chinese text rendering in V8.1.",
+  "Return only a valid JSON object with this shape: brief, finalPrompt, chineseCheck, questions, assumptions, negativeConstraints.",
+  "brief must be short Simplified Chinese. finalPrompt must be a copy-ready English Midjourney prompt, no Markdown and no code fence.",
+  "chineseCheck must be an object with backTranslation, checklist, and possibleIssues. All chineseCheck text must be Simplified Chinese.",
+  "chineseCheck.backTranslation must explain the finalPrompt faithfully in Chinese and include the meaning of key parameters.",
+  "chineseCheck.checklist must include short checks for subject, scene, camera/composition, lighting, materials/style, aspect ratio, Raw, SD/HD, Stylize, references, and negative prompt when relevant.",
+  "questions, assumptions, and negativeConstraints must be arrays of short Simplified Chinese strings."
+].join("\n");
+
+const MIDJOURNEY_V81_UNSUPPORTED_PARAMETER_PATTERN =
+  /\s--(?:q|quality|cref|cw|oref|ow|draft|niji)\b(?:\s+(?!--)\S+)*/gi;
+const MIDJOURNEY_PARAMETER_PATTERNS = [
+  /\s--ar(?:\s+(?!--)\S+)*/gi,
+  /\s--aspect(?:\s+(?!--)\S+)*/gi,
+  /\s--v(?:ersion)?\s+(?!--)\S+(?:\s+(?!--)\S+)*/gi,
+  /\s--raw\b/gi,
+  /\s--hd\b/gi,
+  /\s--sd\b/gi,
+  /\s--s(?:tylize)?\s+(?!--)\S+/gi,
+  /\s--c(?:haos)?\s+(?!--)\S+/gi,
+  /\s--w(?:eird)?\s+(?!--)\S+/gi,
+  /\s--seed\s+(?!--)\S+/gi,
+  /\s--p(?:rofile)?(?:\s+(?!--)\S+)*/gi,
+  /\s--iw\s+(?!--)\S+/gi,
+  /\s--sref(?:\s+(?!--)\S+)*/gi,
+  /\s--sw\s+(?!--)\S+/gi,
+  /\s--no\s+[\s\S]*?(?=\s--[a-z]|\s*$)/gi
+];
 
 export async function analyzeImagePrompt(
   config: OpenAiGatewayConfig,
@@ -410,24 +467,37 @@ export async function generateNanoBananaAssistantPrompt(
 
   input.onProgress?.({
     phase: "analyzing",
-    message: "Calling Nano Banana Pro prompt assistant"
+    message:
+      input.engine === "midjourney-v8.1"
+        ? "Calling Midjourney V8.1 prompt assistant"
+        : "Calling Nano Banana Pro prompt assistant"
   });
 
   const messages: ChatMessage[] = [
     {
       role: "system",
-      content: NANO_BANANA_ASSISTANT_SYSTEM_PROMPT
+      content:
+        input.engine === "midjourney-v8.1"
+          ? MIDJOURNEY_V81_ASSISTANT_SYSTEM_PROMPT
+          : NANO_BANANA_ASSISTANT_SYSTEM_PROMPT
     },
     {
       role: "user",
-      content: createNanoBananaAssistantUserContent(input)
+      content:
+        input.engine === "midjourney-v8.1"
+          ? createMidjourneyAssistantUserContent(input)
+          : createNanoBananaAssistantUserContent(input)
     }
   ];
 
-  return requestAssistantPromptResult(config, messages, {
+  const result = await requestAssistantPromptResult(config, messages, {
     signal: input.signal,
     onProgress: input.onProgress
   });
+
+  return input.engine === "midjourney-v8.1"
+    ? normalizeMidjourneyAssistantResult(result, input)
+    : result;
 }
 
 function createNanoBananaAssistantUserContent(
@@ -485,6 +555,371 @@ function createNanoBananaAssistantUserContent(
         }
       }))
   ];
+}
+
+function createMidjourneyAssistantUserContent(
+  input: AssistantPromptInput
+): ChatContent {
+  const renderQuality = input.renderQuality ?? "hd";
+  const text = [
+    "Create a Midjourney V8.1 prompt from this request.",
+    "",
+    `Mode: ${input.mode}`,
+    `Aspect ratio: ${input.aspectRatio}`,
+    `Render quality: ${renderQuality}`,
+    `Raw mode: ${input.rawEnabled === false ? "disabled" : "enabled"}`,
+    `Stylize: ${normalizeInteger(input.stylize, getDefaultMidjourneyStylize(input))}`,
+    `Chaos: ${normalizeInteger(input.chaos, 0)}`,
+    `Weird: ${normalizeInteger(input.weird, 0)}`,
+    input.seed?.trim() ? `Seed: ${input.seed.trim()}` : "",
+    input.personalizationCode?.trim()
+      ? `Personalization: ${input.personalizationCode.trim()}`
+      : "",
+    input.identityLock
+      ? "Identity consistency requested: V8.1 does not support --cref/--cw or --oref/--ow. Explain this in Chinese and use image prompt + clear text description + seed as weaker alternatives."
+      : "Identity consistency requested: no",
+    input.negativePrompt?.trim()
+      ? `Negative prompt requested: ${input.negativePrompt.trim()}`
+      : "",
+    input.extraSpecs?.trim() ? `Extra specs: ${input.extraSpecs.trim()}` : "",
+    "",
+    "User idea:",
+    input.idea.trim(),
+    "",
+    input.references.length
+      ? [
+          "Reference images:",
+          ...input.references.map((reference, index) =>
+            [
+              `Image ${index + 1}`,
+              `Role: ${reference.role}`,
+              `Label: ${reference.label ?? `Image ${index + 1}`}`,
+              `Source title: ${reference.sourceTitle ?? "unknown"}`,
+              `MJ usable URL or placeholder: ${getMidjourneyReferenceUrl(
+                reference,
+                index
+              )}`,
+              `Source URL: ${reference.sourceImageUrl ?? "unknown"}`,
+              reference.role === "style"
+                ? "Use as --sref when a usable URL exists; use a placeholder if local."
+                : "Use as an image prompt when a usable URL exists; use a placeholder if local."
+            ].join("\n")
+          )
+        ].join("\n")
+      : "Reference images: none",
+    "",
+    "Final prompt rules:",
+    "1. finalPrompt must be one English Midjourney V8.1 prompt only, with all parameters at the end.",
+    "2. Include --v 8.1. Do not include --q, --quality, --cref, --cw, --oref, --ow, --draft, --niji, or ::.",
+    "3. If a local reference has no public URL, use placeholders like <image-1-url> instead of data URLs.",
+    "4. Return JSON only. Use chineseCheck to explain the prompt and parameter choices in Chinese."
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  if (!input.references.some((reference) => reference.imageUrl)) {
+    return text;
+  }
+
+  return [
+    {
+      type: "text",
+      text
+    },
+    ...input.references
+      .filter((reference) => Boolean(reference.imageUrl))
+      .map((reference) => ({
+        type: "image_url" as const,
+        image_url: {
+          url: reference.imageUrl!,
+          detail: "high" as const
+        }
+      }))
+  ];
+}
+
+function normalizeMidjourneyAssistantResult(
+  result: AssistantPromptResult,
+  input: AssistantPromptInput
+): AssistantPromptResult {
+  const sanitizedPrompt = sanitizeMidjourneyFinalPrompt(result.finalPrompt, input);
+  const warnings = createMidjourneyWarnings(result.finalPrompt, input);
+  const chineseCheck = result.chineseCheck
+    ? {
+        ...result.chineseCheck,
+        checklist: mergeUniqueStrings(
+          result.chineseCheck.checklist,
+          createMidjourneyChecklist(input)
+        ),
+        possibleIssues: mergeUniqueStrings(
+          result.chineseCheck.possibleIssues,
+          warnings
+        )
+      }
+    : {
+        backTranslation: "已按 Midjourney V8.1 规范整理为英文提示词，参数统一放在末尾。",
+        checklist: createMidjourneyChecklist(input),
+        possibleIssues: warnings
+      };
+
+  return {
+    ...result,
+    brief: result.brief || "Midjourney V8.1 提示词已生成",
+    finalPrompt: sanitizedPrompt,
+    questions: mergeUniqueStrings(result.questions, warnings),
+    assumptions: mergeUniqueStrings(result.assumptions, [
+      "默认使用 Midjourney V8.1，不混用 Niji 或 V7 专用参数。",
+      input.renderQuality === "sd"
+        ? "当前按快速探索输出 SD。"
+        : "当前按定稿质量输出 HD。"
+    ]),
+    negativeConstraints: mergeUniqueStrings(
+      result.negativeConstraints,
+      readNegativePromptItems(input.negativePrompt)
+    ),
+    chineseCheck
+  };
+}
+
+function sanitizeMidjourneyFinalPrompt(
+  finalPrompt: string,
+  input: AssistantPromptInput
+): string {
+  const existingNegativePrompt = extractMidjourneyNoParameter(finalPrompt);
+  let body = stripMarkdownFence(finalPrompt)
+    .replace(/^\/imagine\s+prompt:\s*/i, "")
+    .replace(MIDJOURNEY_V81_UNSUPPORTED_PARAMETER_PATTERN, "")
+    .replace(/::\s*-?\d*(?:\.\d+)?/g, ", ");
+
+  for (const pattern of MIDJOURNEY_PARAMETER_PATTERNS) {
+    body = body.replace(pattern, "");
+  }
+
+  body = body
+    .replace(/\s+/g, " ")
+    .replace(/[,\s]+$/g, "")
+    .trim();
+
+  const referencePrefix = createMidjourneyImagePromptPrefix(input);
+  const suffix = createMidjourneyParameterSuffix(
+    input,
+    existingNegativePrompt
+  );
+  const promptBody = [referencePrefix, body].filter(Boolean).join(" ").trim();
+
+  return [promptBody || input.idea.trim(), suffix].filter(Boolean).join(" ").trim();
+}
+
+function createMidjourneyImagePromptPrefix(input: AssistantPromptInput): string {
+  return input.references
+    .map((reference, index) =>
+      reference.role !== "style" ? getMidjourneyReferenceUrl(reference, index) : ""
+    )
+    .filter(Boolean)
+    .join(" ");
+}
+
+function createMidjourneyParameterSuffix(
+  input: AssistantPromptInput,
+  existingNegativePrompt: string
+): string {
+  const parts = [`--ar ${input.aspectRatio}`, "--v 8.1"];
+
+  if (input.rawEnabled !== false) {
+    parts.push("--raw");
+  }
+
+  parts.push(input.renderQuality === "sd" ? "--sd" : "--hd");
+  parts.push(`--s ${normalizeInteger(input.stylize, getDefaultMidjourneyStylize(input), 0, 1000)}`);
+
+  const chaos = normalizeInteger(input.chaos, 0, 0, 100);
+  const weird = normalizeInteger(input.weird, 0, 0, 3000);
+  const seed = input.seed?.trim();
+  const personalizationCode = input.personalizationCode?.trim();
+  const imagePromptPrefix = createMidjourneyImagePromptPrefix(input);
+  const styleReferences = input.references.filter(
+    (reference) => reference.role === "style"
+  );
+
+  if (chaos > 0) {
+    parts.push(`--c ${chaos}`);
+  }
+
+  if (weird > 0) {
+    parts.push(`--w ${weird}`);
+  }
+
+  if (seed && /^\d+$/.test(seed)) {
+    parts.push(`--seed ${seed}`);
+  }
+
+  if (imagePromptPrefix) {
+    parts.push("--iw 1");
+  }
+
+  if (styleReferences.length) {
+    const styleUrls = input.references
+      .map((reference, index) =>
+        reference.role === "style" ? getMidjourneyReferenceUrl(reference, index) : ""
+      )
+      .filter(Boolean);
+
+    if (styleUrls.length) {
+      parts.push(`--sref ${styleUrls.join(" ")}`, "--sw 100");
+    }
+  }
+
+  if (personalizationCode) {
+    parts.push(`--p ${personalizationCode}`);
+  }
+
+  const negativePrompt = normalizeMidjourneyNegativePrompt(
+    [input.negativePrompt, existingNegativePrompt].filter(Boolean).join(", ")
+  );
+
+  if (negativePrompt) {
+    parts.push(`--no ${negativePrompt}`);
+  }
+
+  return parts.join(" ");
+}
+
+function createMidjourneyChecklist(input: AssistantPromptInput): string[] {
+  const checklist = [
+    `画幅比例：${input.aspectRatio}`,
+    "模型：已使用 --v 8.1",
+    input.rawEnabled === false ? "Raw：未启用" : "Raw：已启用",
+    input.renderQuality === "sd" ? "质量：SD 快速探索" : "质量：HD 定稿",
+    `Stylize：${normalizeInteger(input.stylize, getDefaultMidjourneyStylize(input), 0, 1000)}`
+  ];
+
+  if (input.references.length) {
+    checklist.push("参考图：风格参考使用 --sref，其它参考图使用 image prompt URL 或占位符。");
+  }
+
+  if (input.negativePrompt?.trim()) {
+    checklist.push("负面参数：已整理到 --no。");
+  }
+
+  return checklist;
+}
+
+function createMidjourneyWarnings(
+  originalPrompt: string,
+  input: AssistantPromptInput
+): string[] {
+  const warnings: string[] = [];
+
+  if (MIDJOURNEY_V81_UNSUPPORTED_PARAMETER_PATTERN.test(originalPrompt)) {
+    warnings.push("已移除 V8.1 不支持的 --q、--cref、--cw、--oref、--ow 或 --draft 参数。");
+  }
+  MIDJOURNEY_V81_UNSUPPORTED_PARAMETER_PATTERN.lastIndex = 0;
+
+  if (originalPrompt.includes("::")) {
+    warnings.push("V8.1 不支持多重提示词 ::，已改为自然语言权重表达。");
+  }
+
+  if (
+    input.identityLock ||
+    input.references.some((reference) => reference.role === "identity")
+  ) {
+    warnings.push("V8.1 不支持角色/Omni Reference；身份参考会作为 image prompt 和文字描述使用。");
+  }
+
+  if (input.references.some((reference, index) => isMidjourneyPlaceholderUrl(getMidjourneyReferenceUrl(reference, index)))) {
+    warnings.push("本地参考图不能直接用于 MJ URL 参数；请先上传到 Midjourney 或 Discord 后替换占位 URL。");
+  }
+
+  if (input.renderQuality !== "sd" && isAspectRatioWiderThan(input.aspectRatio, 4)) {
+    warnings.push("V8.1 HD 模式不适合超过 4:1 的超宽比例，已按当前可选比例保留。");
+  }
+
+  return warnings;
+}
+
+function getMidjourneyReferenceUrl(
+  reference: AssistantPromptReference,
+  index: number
+): string {
+  const candidates = [reference.sourceImageUrl, reference.imageUrl]
+    .map((value) => value?.trim())
+    .filter((value): value is string => Boolean(value));
+  const publicUrl = candidates.find((value) => /^https?:\/\//i.test(value));
+
+  return publicUrl ?? `<image-${index + 1}-url>`;
+}
+
+function extractMidjourneyNoParameter(prompt: string): string {
+  const match = /\s--no\s+([\s\S]*?)(?=\s--[a-z]|\s*$)/i.exec(prompt);
+  return match?.[1]?.trim() ?? "";
+}
+
+function normalizeMidjourneyNegativePrompt(value: string | undefined): string {
+  return (value ?? "")
+    .replace(/^--no\s+/i, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[.;，。]+$/g, "");
+}
+
+function readNegativePromptItems(value: string | undefined): string[] {
+  const normalized = normalizeMidjourneyNegativePrompt(value);
+
+  if (!normalized) {
+    return [];
+  }
+
+  return normalized
+    .split(/[,，]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function getDefaultMidjourneyStylize(input: AssistantPromptInput): number {
+  if (input.renderQuality === "sd") {
+    return 150;
+  }
+
+  if (input.aspectRatio === "4:5") {
+    return 80;
+  }
+
+  if (input.aspectRatio === "21:9") {
+    return 150;
+  }
+
+  return 120;
+}
+
+function normalizeInteger(
+  value: number | undefined,
+  fallback: number,
+  min = 0,
+  max = Number.MAX_SAFE_INTEGER
+): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+function mergeUniqueStrings(left: string[], right: string[]): string[] {
+  return [...new Set([...left, ...right].map((item) => item.trim()).filter(Boolean))];
+}
+
+function isMidjourneyPlaceholderUrl(value: string): boolean {
+  return /^<image-\d+-url>$/.test(value);
+}
+
+function isAspectRatioWiderThan(value: AssistantAspectRatio, limit: number): boolean {
+  const [width, height] = value.split(":").map(Number);
+
+  if (!width || !height) {
+    return false;
+  }
+
+  return width / height > limit;
 }
 
 async function requestAssistantPromptResult(

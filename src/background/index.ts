@@ -151,11 +151,26 @@ type RuntimeRequest =
   | { type: "panel:generate-assistant-prompt"; input: AssistantPromptInput }
   | { type: "panel:get-assistant-history" }
   | { type: "panel:remove-assistant-history"; id: string }
-  | { type: "panel:clear-assistant-history" };
+  | { type: "panel:clear-assistant-history" }
+  | {
+      type: "panel:send-assistant-to-photoshop";
+      input: AssistantPromptInput;
+      result: AssistantPromptResult;
+      targetStageId?: string;
+    };
 
 interface AssistantGenerateResponse {
   result: AssistantPromptResult;
   history: AssistantHistoryItem[];
+}
+
+interface PhotoshopInboxResponse {
+  item: {
+    id: string;
+    receivedAt: string;
+    finalPrompt: string;
+  };
+  history: unknown[];
 }
 
 interface ContentImageResponse {
@@ -341,9 +356,124 @@ async function handleRuntimeMessage(message: RuntimeRequest): Promise<unknown> {
       await clearAssistantHistory();
       return [];
 
+    case "panel:send-assistant-to-photoshop":
+      return sendAssistantPromptToPhotoshop(message.input, message.result, message.targetStageId);
+
     default:
       throw createAppError("unknown_error", "Unsupported runtime message.");
   }
+}
+
+async function sendAssistantPromptToPhotoshop(
+  input: AssistantPromptInput,
+  result: AssistantPromptResult,
+  targetStageId?: string
+): Promise<PhotoshopInboxResponse> {
+  if (!result.finalPrompt?.trim()) {
+    throw createAppError("photoshop_bridge_unavailable", "No final prompt to send.");
+  }
+
+  const settings = await getSettings();
+  const endpoint = createPromptInboxEndpoint(settings.photoshopBridgeUrl);
+  const controller = new AbortController();
+  const timeoutId = globalThis.setTimeout(() => controller.abort(), 8000);
+
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(createPromptInboxPayload(input, result, targetStageId)),
+      signal: controller.signal
+    });
+    const responseText = await response.text();
+
+    if (!response.ok) {
+      throw createAppError(
+        "photoshop_bridge_unavailable",
+        `Photoshop Bridge returned HTTP ${response.status}.`,
+        { status: response.status, responseText }
+      );
+    }
+
+    try {
+      return JSON.parse(responseText) as PhotoshopInboxResponse;
+    } catch {
+      throw createAppError(
+        "photoshop_bridge_unavailable",
+        "Photoshop Bridge returned a non-JSON response.",
+        { responseText }
+      );
+    }
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw createAppError(
+        "photoshop_bridge_unavailable",
+        "Photoshop Bridge request timed out.",
+        { responseText: endpoint }
+      );
+    }
+
+    if (error instanceof TypeError) {
+      throw createAppError(
+        "photoshop_bridge_unavailable",
+        "Could not connect to Photoshop Bridge.",
+        { responseText: endpoint }
+      );
+    }
+
+    throw error;
+  } finally {
+    globalThis.clearTimeout(timeoutId);
+  }
+}
+
+function createPromptInboxPayload(
+  input: AssistantPromptInput,
+  result: AssistantPromptResult,
+  targetStageId?: string
+): Record<string, unknown> {
+  const normalizedTargetStageId = typeof targetStageId === "string" ? targetStageId.trim() : "";
+
+  return {
+    source: "browser-extension",
+    sourceApp: "prompt-reverse-engineer-extension",
+    targetStageId: normalizedTargetStageId,
+    idea: input.idea,
+    brief: result.brief,
+    finalPrompt: result.finalPrompt,
+    chineseCheck: result.chineseCheck,
+    negativeConstraints: result.negativeConstraints,
+    references: input.references.map((reference, index) => ({
+      label: reference.label || `图片 ${index + 1}`,
+      role: reference.role,
+      imageUrl: safeReferenceUrl(reference.imageUrl),
+      sourceImageUrl: safeReferenceUrl(reference.sourceImageUrl),
+      sourcePageUrl: reference.sourcePageUrl || "",
+      sourceTitle: reference.sourceTitle || ""
+    }))
+  };
+}
+
+function createPromptInboxEndpoint(bridgeUrl: string): string {
+  try {
+    return new URL("/prompt-inbox", bridgeUrl.replace(/\/+$/, "") + "/").toString();
+  } catch {
+    throw createAppError(
+      "photoshop_bridge_unavailable",
+      "Invalid Photoshop Bridge URL.",
+      { responseText: bridgeUrl }
+    );
+  }
+}
+
+function safeReferenceUrl(value: string | undefined): string {
+  if (!value || /^data:image\//i.test(value)) {
+    return "";
+  }
+
+  return value;
 }
 
 async function generateAssistantPrompt(

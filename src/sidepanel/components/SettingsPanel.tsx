@@ -116,11 +116,22 @@ export function SettingsPanel() {
         />
       </label>
 
+      <label className="field-label">
+        <span>Photoshop Bridge 地址</span>
+        <input
+          value={settings.photoshopBridgeUrl}
+          placeholder="http://127.0.0.1:8787"
+          onChange={(event) =>
+            setSettings({ ...settings, photoshopBridgeUrl: event.target.value })
+          }
+        />
+      </label>
+
       <section className="settings-note">
         <strong>开发模式</strong>
         <p>
           本地开发可通过 .env 提供 VITE_DEFAULT_API_BASE_URL、VITE_DEFAULT_MODEL
-          和 VITE_DEFAULT_API_KEY。真实 .env 不会进入 git。
+          、VITE_DEFAULT_API_KEY 和 VITE_DEFAULT_PHOTOSHOP_BRIDGE_URL。真实 .env 不会进入 git。
         </p>
       </section>
 

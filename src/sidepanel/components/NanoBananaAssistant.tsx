@@ -6,16 +6,19 @@ import {
   ImageIcon,
   Loader2,
   RefreshCw,
+  Send,
   Trash2,
   WandSparkles
 } from "lucide-react";
 import { toUserFacingError, type UserFacingError } from "../../lib/errors";
 import type {
+  AssistantEngine,
   AssistantAspectRatio,
   AssistantPromptInput,
   AssistantPromptMode,
   AssistantPromptResult,
   AssistantReferenceRole,
+  AssistantRenderQuality,
   AssistantResolution
 } from "../../lib/openaiClient";
 import type { AssistantHistoryItem } from "../../lib/storage";
@@ -52,6 +55,11 @@ interface NanoBananaAssistantProps {
   onAddReferenceImages: (images: CapturedImage[]) => void | Promise<unknown>;
   onSetReferenceImages: (images: CapturedImage[]) => void | Promise<unknown>;
   onClearReferenceImages: () => void | Promise<unknown>;
+  onSendToPhotoshop: (
+    input: AssistantPromptInput,
+    result: AssistantPromptResult,
+    targetStageId?: string
+  ) => Promise<unknown>;
 }
 
 const ASSISTANT_MODES: Array<{
@@ -67,7 +75,7 @@ const ASSISTANT_MODES: Array<{
   {
     value: "text-to-image",
     label: "文生图",
-    hint: "只根据文字想法生成 Nano Banana Pro 可直接使用的英文提示词。"
+    hint: "只根据文字想法生成可直接复制到目标模型的英文提示词。"
   },
   {
     value: "image-and-text",
@@ -144,6 +152,56 @@ const RESOLUTION_HINTS: Record<AssistantResolution, string> = {
   "4K": "适合最终海报、产品图和细节要求高的画面。"
 };
 
+const ASSISTANT_ENGINES: Array<{
+  value: AssistantEngine;
+  label: string;
+  hint: string;
+}> = [
+  {
+    value: "nano-banana-pro",
+    label: "Nano Banana Pro",
+    hint: "适合改图、图文生成和发送到 Photoshop 工作流。"
+  },
+  {
+    value: "midjourney-v8.1",
+    label: "Midjourney V8.1",
+    hint: "按 V8.1 官方参数规则生成英文 MJ Prompt。"
+  }
+];
+
+const RENDER_QUALITIES: Array<{
+  value: AssistantRenderQuality;
+  label: string;
+  hint: string;
+}> = [
+  {
+    value: "sd",
+    label: "探索 SD",
+    hint: "标准分辨率，速度更快，适合先探索构图。"
+  },
+  {
+    value: "hd",
+    label: "定稿 HD",
+    hint: "V8.1 原生 2K，高细节，适合最终候选。"
+  }
+];
+
+const PHOTOSHOP_TARGET_STAGES = [
+  { value: "", label: "跟随 PS 当前阶段" },
+  { value: "reference_search", label: "01 · 查找参考图" },
+  { value: "sketch", label: "02 · 草图" },
+  { value: "lineart", label: "03 · 线稿" },
+  { value: "color_key", label: "04 · 配色" },
+  { value: "refine", label: "05 · 细化" },
+  { value: "asset_split", label: "06 · 单体拆分" },
+  { value: "turnaround", label: "07 · 三视图" },
+  { value: "ingame_preview", label: "08 · 游戏内效果图" },
+  { value: "layer_split", label: "09 · 自动拆分层" }
+] as const;
+
+type PhotoshopTargetStageId =
+  (typeof PHOTOSHOP_TARGET_STAGES)[number]["value"];
+
 export function NanoBananaAssistant({
   mixImages,
   disabled,
@@ -153,14 +211,27 @@ export function NanoBananaAssistant({
   onClearHistory,
   onAddReferenceImages,
   onSetReferenceImages,
-  onClearReferenceImages
+  onClearReferenceImages,
+  onSendToPhotoshop
 }: NanoBananaAssistantProps) {
   const referenceInputRef = useRef<HTMLInputElement | null>(null);
+  const [engine, setEngine] = useState<AssistantEngine>("nano-banana-pro");
   const [mode, setMode] = useState<AssistantPromptMode>("auto");
   const [idea, setIdea] = useState("");
   const [aspectRatio, setAspectRatio] = useState<AssistantAspectRatio>("16:9");
   const [resolution, setResolution] = useState<AssistantResolution>("2K");
+  const [renderQuality, setRenderQuality] = useState<AssistantRenderQuality>("hd");
+  const [rawEnabled, setRawEnabled] = useState(true);
+  const [stylize, setStylize] = useState(120);
+  const [isStylizeDirty, setIsStylizeDirty] = useState(false);
+  const [chaos, setChaos] = useState(0);
+  const [weird, setWeird] = useState(0);
+  const [seed, setSeed] = useState("");
+  const [negativePrompt, setNegativePrompt] = useState("");
+  const [personalizationCode, setPersonalizationCode] = useState("");
   const [identityLock, setIdentityLock] = useState(false);
+  const [photoshopTargetStageId, setPhotoshopTargetStageId] =
+    useState<PhotoshopTargetStageId>("");
   const [extraSpecs, setExtraSpecs] = useState("");
   const [referenceRoles, setReferenceRoles] = useState<
     Record<string, AssistantReferenceRole>
@@ -171,6 +242,7 @@ export function NanoBananaAssistant({
   const [isLoading, setIsLoading] = useState(false);
   const [isReadingReferences, setIsReadingReferences] = useState(false);
   const [isReferenceDropActive, setIsReferenceDropActive] = useState(false);
+  const [isSendingToPhotoshop, setIsSendingToPhotoshop] = useState(false);
   const [draggedReferenceIndex, setDraggedReferenceIndex] = useState<number | null>(
     null
   );
@@ -178,6 +250,7 @@ export function NanoBananaAssistant({
     number | null
   >(null);
   const [copied, setCopied] = useState(false);
+  const [sentToPhotoshop, setSentToPhotoshop] = useState(false);
 
   useEffect(() => {
     void onGetHistory().then(setHistory).catch(() => setHistory([]));
@@ -229,14 +302,47 @@ export function NanoBananaAssistant({
   );
 
   const canGenerate = idea.trim().length > 0 && !isLoading && !disabled;
+  const isMidjourney = engine === "midjourney-v8.1";
+  const currentEngine = ASSISTANT_ENGINES.find((item) => item.value === engine);
   const currentMode = ASSISTANT_MODES.find((item) => item.value === mode);
+  const currentRenderQuality =
+    RENDER_QUALITIES.find((item) => item.value === renderQuality) ??
+    {
+      value: "hd" as const,
+      label: "定稿 HD",
+      hint: "V8.1 原生 2K，高细节，适合最终候选。"
+    };
+  const activeQualityHint = isMidjourney
+    ? currentRenderQuality.hint
+    : RESOLUTION_HINTS[resolution];
+  const photoshopTargetStage =
+    PHOTOSHOP_TARGET_STAGES.find((stage) => stage.value === photoshopTargetStageId) ??
+    PHOTOSHOP_TARGET_STAGES[0];
+  const photoshopTransferHint = sentToPhotoshop
+    ? "已发送，回到 PS 点击接收并填入"
+    : result?.finalPrompt
+      ? "选择阶段后发送到本机 Photoshop"
+      : "生成提示词后可发送到 Photoshop";
+  const photoshopSendLabel = isSendingToPhotoshop
+    ? "发送中"
+    : sentToPhotoshop ? "已发送" : "发送到 PS";
+
+  useEffect(() => {
+    if (!isMidjourney || isStylizeDirty) {
+      return;
+    }
+
+    setStylize(getMidjourneyStylizePreset(aspectRatio, renderQuality));
+  }, [aspectRatio, isMidjourney, isStylizeDirty, renderQuality]);
 
   async function generatePrompt() {
     if (!idea.trim()) {
       setError({
         code: "missing_config",
         title: "缺少想法",
-        message: "先写下你想让 Nano Banana Pro 生成或修改什么。",
+        message: isMidjourney
+          ? "先写下你想让 Midjourney V8.1 生成什么。"
+          : "先写下你想让 Nano Banana Pro 生成或修改什么。",
         canRetry: false
       });
       return;
@@ -247,13 +353,24 @@ export function NanoBananaAssistant({
 
     try {
       const response = await onGenerate({
+        engine,
         mode,
         idea,
         references,
         aspectRatio,
         resolution,
         identityLock,
-        extraSpecs: extraSpecs.trim() || undefined
+        extraSpecs: extraSpecs.trim() || undefined,
+        rawEnabled: isMidjourney ? rawEnabled : undefined,
+        renderQuality: isMidjourney ? renderQuality : undefined,
+        stylize: isMidjourney ? stylize : undefined,
+        chaos: isMidjourney ? chaos : undefined,
+        weird: isMidjourney ? weird : undefined,
+        seed: isMidjourney ? seed.trim() || undefined : undefined,
+        negativePrompt: isMidjourney ? negativePrompt.trim() || undefined : undefined,
+        personalizationCode: isMidjourney
+          ? personalizationCode.trim() || undefined
+          : undefined
       });
 
       setResult(response.result);
@@ -275,6 +392,25 @@ export function NanoBananaAssistant({
     window.setTimeout(() => setCopied(false), 1400);
   }
 
+  async function sendToPhotoshop() {
+    if (!result?.finalPrompt) {
+      return;
+    }
+
+    setIsSendingToPhotoshop(true);
+    setError(null);
+
+    try {
+      await onSendToPhotoshop(createAssistantInput(), result, photoshopTargetStageId);
+      setSentToPhotoshop(true);
+      window.setTimeout(() => setSentToPhotoshop(false), 1800);
+    } catch (caught) {
+      setError(toUserFacingError(caught));
+    } finally {
+      setIsSendingToPhotoshop(false);
+    }
+  }
+
   async function refreshHistory() {
     setHistory(await onGetHistory());
   }
@@ -286,6 +422,29 @@ export function NanoBananaAssistant({
   async function clearHistory() {
     await onClearHistory();
     setHistory([]);
+  }
+
+  function createAssistantInput(): AssistantPromptInput {
+    return {
+      engine,
+      mode,
+      idea,
+      references,
+      aspectRatio,
+      resolution,
+      identityLock,
+      extraSpecs: extraSpecs.trim() || undefined,
+      rawEnabled: isMidjourney ? rawEnabled : undefined,
+      renderQuality: isMidjourney ? renderQuality : undefined,
+      stylize: isMidjourney ? stylize : undefined,
+      chaos: isMidjourney ? chaos : undefined,
+      weird: isMidjourney ? weird : undefined,
+      seed: isMidjourney ? seed.trim() || undefined : undefined,
+      negativePrompt: isMidjourney ? negativePrompt.trim() || undefined : undefined,
+      personalizationCode: isMidjourney
+        ? personalizationCode.trim() || undefined
+        : undefined
+    };
   }
 
   async function addReferenceFiles(files: File[]) {
@@ -489,10 +648,22 @@ export function NanoBananaAssistant({
   }
 
   function restoreHistoryItem(item: AssistantHistoryItem) {
+    setEngine(item.input.engine);
     setMode(item.input.mode);
     setIdea(item.input.idea);
     setAspectRatio(item.input.aspectRatio);
     setResolution(item.input.resolution);
+    setRenderQuality(item.input.renderQuality ?? "hd");
+    setRawEnabled(item.input.rawEnabled ?? true);
+    setStylize(item.input.stylize ?? 120);
+    setIsStylizeDirty(
+      item.input.engine === "midjourney-v8.1" && typeof item.input.stylize === "number"
+    );
+    setChaos(item.input.chaos ?? 0);
+    setWeird(item.input.weird ?? 0);
+    setSeed(item.input.seed ?? "");
+    setNegativePrompt(item.input.negativePrompt ?? "");
+    setPersonalizationCode(item.input.personalizationCode ?? "");
     setIdentityLock(item.input.identityLock);
     setExtraSpecs(item.input.extraSpecs ?? "");
     setResult(item.result);
@@ -514,9 +685,11 @@ export function NanoBananaAssistant({
 
   return (
     <main className="assistant-view">
-      <section className="assistant-hero" aria-label="Nano Banana Pro 提示词助手">
+      <section className="assistant-hero" aria-label="双引擎提示词助手">
         <div>
-          <span className="hero-kicker">NANO BANANA PRO 提示词</span>
+          <span className="hero-kicker">
+            {isMidjourney ? "MIDJOURNEY V8.1 提示词" : "NANO BANANA PRO 提示词"}
+          </span>
           <h2>提示词助手</h2>
         </div>
         <div className="hero-metrics">
@@ -526,9 +699,9 @@ export function NanoBananaAssistant({
               {mixImages.length ? `${mixImages.length} / 6 张参考图` : "纯文本"}
             </span>
           </Tooltip>
-          <Tooltip content={`${RESOLUTION_HINTS[resolution]} 当前画幅为 ${aspectRatio}。`}>
+          <Tooltip content={`${activeQualityHint} 当前画幅为 ${aspectRatio}。`}>
             <span>
-              {resolution} · {aspectRatio}
+              {isMidjourney ? renderQuality.toUpperCase() : resolution} · {aspectRatio}
             </span>
           </Tooltip>
         </div>
@@ -539,19 +712,52 @@ export function NanoBananaAssistant({
           <div className="section-header">
             <div>
               <h2>输入</h2>
-              <p>把中文想法、参考图和限制条件整理成可直接复制的英文提示词</p>
+              <p>
+                {isMidjourney
+                  ? "把中文创意整理成 Midjourney V8.1 可直接复制的英文 Prompt"
+                  : "把中文想法、参考图和限制条件整理成可直接复制的英文提示词"}
+              </p>
             </div>
-            <Tooltip content="根据你的想法、参考图角色、比例和分辨率生成最终英文提示词">
+            <Tooltip content={currentEngine?.hint ?? "选择目标模型后生成英文提示词"}>
               <WandSparkles size={18} />
             </Tooltip>
           </div>
 
+          <div className="assistant-engine-grid" role="tablist" aria-label="提示词引擎">
+            {ASSISTANT_ENGINES.map((item) => (
+              <Tooltip content={item.hint} key={item.value}>
+                <button
+                  className={engine === item.value ? "active" : ""}
+                  type="button"
+                  role="tab"
+                  aria-selected={engine === item.value}
+                  onClick={() => setEngine(item.value)}
+                >
+                  {item.label}
+                </button>
+              </Tooltip>
+            ))}
+          </div>
+          <p className="assistant-field-hint">
+            当前引擎：{currentEngine?.label ?? "Nano Banana Pro"}。{currentEngine?.hint}
+          </p>
+
           <details className="assistant-guide">
             <summary>使用说明</summary>
             <div className="assistant-guide-list">
-              <span>纯文字出图时，直接写画面目标、风格和要出现的文字。</span>
-              <span>多图任务先在上方“多图参考”加入图片，再给每张图指定参考角色。</span>
-              <span>需要保留人物或产品身份时，打开“身份锁定”，避免自动美化或改脸。</span>
+              {isMidjourney ? (
+                <>
+                  <span>V8.1 会输出英文完整画面句子，并把参数统一放到末尾。</span>
+                  <span>本地参考图会用占位 URL，使用前需要上传到 MJ 或 Discord 替换。</span>
+                  <span>V8.1 不支持 --cref、--oref、--q、--draft 或 :: 多重提示。</span>
+                </>
+              ) : (
+                <>
+                  <span>纯文字出图时，直接写画面目标、风格和要出现的文字。</span>
+                  <span>多图任务先在上方“多图参考”加入图片，再给每张图指定参考角色。</span>
+                  <span>需要保留人物或产品身份时，打开“身份锁定”，避免自动美化或改脸。</span>
+                </>
+              )}
             </div>
           </details>
 
@@ -580,7 +786,11 @@ export function NanoBananaAssistant({
               value={idea}
               onChange={(event) => setIdea(event.target.value)}
               rows={6}
-              placeholder="例如：生成一个国风武侠场景，角色站在雨夜古街中央，画面有电影海报质感。"
+              placeholder={
+                isMidjourney
+                  ? "例如：国风武侠竹林电影画面，两名侠客在夕阳雾气中飞身交手，写实电影剧照。"
+                  : "例如：生成一个国风武侠场景，角色站在雨夜古街中央，画面有电影海报质感。"
+              }
             />
           </label>
 
@@ -603,23 +813,43 @@ export function NanoBananaAssistant({
               </Tooltip>
             </label>
 
-            <label className="field-label">
-              <span>分辨率</span>
-              <Tooltip content={RESOLUTION_HINTS[resolution]}>
-                <select
-                  value={resolution}
-                  onChange={(event) =>
-                    setResolution(event.target.value as AssistantResolution)
-                  }
-                >
-                  {RESOLUTIONS.map((item) => (
-                    <option value={item} key={item}>
-                      {RESOLUTION_LABELS[item]}
-                    </option>
-                  ))}
-                </select>
-              </Tooltip>
-            </label>
+            {isMidjourney ? (
+              <label className="field-label">
+                <span>输出质量</span>
+                <Tooltip content={currentRenderQuality.hint}>
+                  <select
+                    value={renderQuality}
+                    onChange={(event) =>
+                      setRenderQuality(event.target.value as AssistantRenderQuality)
+                    }
+                  >
+                    {RENDER_QUALITIES.map((item) => (
+                      <option value={item.value} key={item.value}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                </Tooltip>
+              </label>
+            ) : (
+              <label className="field-label">
+                <span>分辨率</span>
+                <Tooltip content={RESOLUTION_HINTS[resolution]}>
+                  <select
+                    value={resolution}
+                    onChange={(event) =>
+                      setResolution(event.target.value as AssistantResolution)
+                    }
+                  >
+                    {RESOLUTIONS.map((item) => (
+                      <option value={item} key={item}>
+                        {RESOLUTION_LABELS[item]}
+                      </option>
+                    ))}
+                  </select>
+                </Tooltip>
+              </label>
+            )}
           </div>
 
           <Tooltip content="用于人物、角色或产品一致性任务，会要求模型不要改年龄、脸型、比例和核心识别特征。">
@@ -633,13 +863,104 @@ export function NanoBananaAssistant({
             </label>
           </Tooltip>
 
+          {isMidjourney && (
+            <section className="assistant-mj-panel" aria-label="Midjourney V8.1 参数">
+              <div className="assistant-mj-header">
+                <strong>MJ V8.1 参数</strong>
+                <span>自动输出 --v 8.1，非法旧参数会被清理</span>
+              </div>
+
+              <Tooltip content="写实摄影、电影剧照、3A 游戏、产品和建筑默认建议启用 Raw。">
+                <label className="identity-lock-toggle assistant-mj-toggle">
+                  <input
+                    type="checkbox"
+                    checked={rawEnabled}
+                    onChange={(event) => setRawEnabled(event.target.checked)}
+                  />
+                  <span>Raw 模式</span>
+                </label>
+              </Tooltip>
+
+              <div className="assistant-mj-grid">
+                <label className="field-label">
+                  <span>Stylize</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={1000}
+                    step={10}
+                    value={stylize}
+                    onChange={(event) => {
+                      setIsStylizeDirty(true);
+                      setStylize(readNumericInput(event.target.value, 120));
+                    }}
+                  />
+                </label>
+                <label className="field-label">
+                  <span>Chaos</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    step={1}
+                    value={chaos}
+                    onChange={(event) => setChaos(readNumericInput(event.target.value, 0))}
+                  />
+                </label>
+                <label className="field-label">
+                  <span>Weird</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={3000}
+                    step={10}
+                    value={weird}
+                    onChange={(event) => setWeird(readNumericInput(event.target.value, 0))}
+                  />
+                </label>
+                <label className="field-label">
+                  <span>Seed</span>
+                  <input
+                    value={seed}
+                    inputMode="numeric"
+                    onChange={(event) => setSeed(event.target.value)}
+                    placeholder="可选，如 1234"
+                  />
+                </label>
+              </div>
+
+              <label className="field-label">
+                <span>Personalization</span>
+                <input
+                  value={personalizationCode}
+                  onChange={(event) => setPersonalizationCode(event.target.value)}
+                  placeholder="可选，填写 --p 后面的 profile code"
+                />
+              </label>
+
+              <label className="field-label">
+                <span>Negative Prompt</span>
+                <textarea
+                  value={negativePrompt}
+                  onChange={(event) => setNegativePrompt(event.target.value)}
+                  rows={2}
+                  placeholder="例如：text, logo, watermark, UI, modern buildings"
+                />
+              </label>
+            </section>
+          )}
+
           <label className="field-label">
             <span>规格补充</span>
             <textarea
               value={extraSpecs}
               onChange={(event) => setExtraSpecs(event.target.value)}
               rows={3}
-              placeholder="补充字体、品牌限制、画面文字、禁用元素、不能改变的角色特征等。"
+              placeholder={
+                isMidjourney
+                  ? "补充镜头、光影、材质、画面文字；不要写 --q、--cref、--oref、:: 等 V8.1 不支持参数。"
+                  : "补充字体、品牌限制、画面文字、禁用元素、不能改变的角色特征等。"
+              }
             />
           </label>
 
@@ -793,7 +1114,7 @@ export function NanoBananaAssistant({
             />
           </div>
 
-          {error && (
+          {error && error.code !== "photoshop_bridge_unavailable" && (
             <section className="error-panel">
               <strong>{error.title}</strong>
               <p>{error.message}</p>
@@ -809,26 +1130,98 @@ export function NanoBananaAssistant({
               disabled={!canGenerate}
             >
               {isLoading ? <Loader2 className="spin" size={16} /> : <WandSparkles size={16} />}
-              <span>{isLoading ? "生成中" : "生成提示词"}</span>
+              <span>
+                {isLoading
+                  ? "生成中"
+                  : isMidjourney
+                    ? "生成 MJ Prompt"
+                    : "生成提示词"}
+              </span>
             </button>
           </Tooltip>
         </section>
 
         <section className="panel-section assistant-output">
-          <div className="section-header">
+          <div
+            className={
+              sentToPhotoshop
+                ? "assistant-transfer-bar is-sent"
+                : "assistant-transfer-bar"
+            }
+          >
+            <div className="assistant-transfer-status">
+              <span className="assistant-transfer-mark" aria-hidden="true">
+                {sentToPhotoshop ? <Check size={15} /> : <Send size={15} />}
+              </span>
+              <div>
+                <strong>发送到 Photoshop</strong>
+                <span>{photoshopTransferHint}</span>
+              </div>
+            </div>
+            <div className="assistant-transfer-controls">
+              <label className="assistant-photoshop-target">
+                <span>目标阶段</span>
+                <Tooltip content="选择后发送给 Photoshop 插件，PS 接收并填入时会切到对应阶段；保持默认则填入 PS 当前阶段。">
+                  <select
+                    value={photoshopTargetStageId}
+                    onChange={(event) =>
+                      setPhotoshopTargetStageId(
+                        event.target.value as PhotoshopTargetStageId
+                      )
+                    }
+                  >
+                    {PHOTOSHOP_TARGET_STAGES.map((stage) => (
+                      <option value={stage.value} key={stage.value || "current"}>
+                        {stage.label}
+                      </option>
+                    ))}
+                  </select>
+                </Tooltip>
+              </label>
+              <Tooltip content={`发送到本机 Photoshop 场景原画助手：${photoshopTargetStage.label}`}>
+                <button
+                  className="assistant-send-button"
+                  type="button"
+                  onClick={sendToPhotoshop}
+                  disabled={!result?.finalPrompt || isSendingToPhotoshop}
+                >
+                  {isSendingToPhotoshop ? (
+                    <Loader2 className="spin" size={15} />
+                  ) : sentToPhotoshop ? (
+                    <Check size={15} />
+                  ) : (
+                    <Send size={15} />
+                  )}
+                  <span>{photoshopSendLabel}</span>
+                </button>
+              </Tooltip>
+            </div>
+          </div>
+
+          {error?.code === "photoshop_bridge_unavailable" && (
+            <section className="error-panel assistant-transfer-error">
+              <strong>{error.title}</strong>
+              <p>{error.message}</p>
+              {error.detail && <small>{error.detail}</small>}
+            </section>
+          )}
+
+          <div className="section-header assistant-output-head">
             <div>
               <h2>最终英文提示词</h2>
               <p>{result?.brief || "等待生成，英文提示词和中文核对会显示在这里"}</p>
             </div>
-            <Tooltip content="复制最终英文提示词">
-              <button
-                type="button"
-                onClick={copyFinalPrompt}
-                disabled={!result?.finalPrompt}
-              >
-                {copied ? <Check size={16} /> : <Copy size={16} />}
-              </button>
-            </Tooltip>
+            <div className="button-row compact">
+              <Tooltip content="复制最终英文提示词">
+                <button
+                  type="button"
+                  onClick={copyFinalPrompt}
+                  disabled={!result?.finalPrompt}
+                >
+                  {copied ? <Check size={16} /> : <Copy size={16} />}
+                </button>
+              </Tooltip>
+            </div>
           </div>
 
           {result ? (
@@ -915,25 +1308,28 @@ function AssistantChineseCheckPanel({
 
   if (!hasCheck) {
     return (
-      <div className="assistant-output-block assistant-chinese-check">
-        <strong>中文核对</strong>
+      <details className="assistant-output-block assistant-output-detail assistant-chinese-check">
+        <summary>
+          <strong>中文核对</strong>
+          <span>暂无</span>
+        </summary>
         <p className="assistant-check-empty">旧记录暂无中文核对。</p>
-      </div>
+      </details>
     );
   }
 
   return (
-    <div className="assistant-output-block assistant-chinese-check">
-      <strong>中文核对</strong>
+    <details className="assistant-output-block assistant-output-detail assistant-chinese-check">
+      <summary>
+        <strong>中文核对</strong>
+        <span>{check?.checklist.length || 0} 项</span>
+      </summary>
       {check?.backTranslation && (
         <p className="assistant-check-translation">{check.backTranslation}</p>
       )}
       <AssistantCheckList title="核对清单" items={check?.checklist ?? []} />
-      <AssistantCheckList
-        title="可能需要确认"
-        items={check?.possibleIssues ?? []}
-      />
-    </div>
+      <AssistantCheckList title="可能需要确认" items={check?.possibleIssues ?? []} />
+    </details>
   );
 }
 
@@ -970,9 +1366,26 @@ function AssistantResultList({
   if (!items.length) {
     return null;
   }
+  const shouldCollapse = title === "默认假设" || title === "负面约束";
+
+  if (shouldCollapse) {
+    return (
+      <details className="assistant-output-block assistant-output-detail">
+        <summary>
+          <strong>{title}</strong>
+          <span>{items.length} 项</span>
+        </summary>
+        <ul>
+          {items.map((item) => (
+            <li key={item}>{item}</li>
+          ))}
+        </ul>
+      </details>
+    );
+  }
 
   return (
-    <div className="assistant-output-block">
+    <div className="assistant-output-block assistant-output-list">
       <strong>{title}</strong>
       <ul>
         {items.map((item) => (
@@ -1023,6 +1436,30 @@ function isInteractiveDragTarget(target: EventTarget): boolean {
     target instanceof Element &&
     Boolean(target.closest("button, input, label, select, textarea"))
   );
+}
+
+function readNumericInput(value: string, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function getMidjourneyStylizePreset(
+  aspectRatio: AssistantAspectRatio,
+  renderQuality: AssistantRenderQuality
+): number {
+  if (renderQuality === "sd") {
+    return 150;
+  }
+
+  if (aspectRatio === "4:5") {
+    return 80;
+  }
+
+  if (aspectRatio === "21:9" || aspectRatio === "3:4" || aspectRatio === "2:3") {
+    return 150;
+  }
+
+  return 120;
 }
 
 function formatDate(value: string): string {

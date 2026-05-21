@@ -657,6 +657,26 @@ export function App() {
     });
   }, []);
 
+  const sendAssistantPromptToPhotoshop = useCallback(
+    async (
+      input: AssistantPromptInput,
+      result: AssistantPromptResult,
+      targetStageId?: string
+    ) => {
+      if (!hasExtensionRuntime()) {
+        throw new Error("Extension runtime is unavailable in local preview.");
+      }
+
+      return sendRuntimeMessage({
+        type: "panel:send-assistant-to-photoshop",
+        input,
+        result,
+        targetStageId
+      });
+    },
+    []
+  );
+
   const changeTemplate = useCallback(async (templateId: string) => {
     setSettings((current) =>
       current ? { ...current, selectedPromptTemplateId: templateId } : current
@@ -921,6 +941,7 @@ export function App() {
           onAddReferenceImages={addMixImages}
           onSetReferenceImages={setMixImageQueue}
           onClearReferenceImages={clearMixImages}
+          onSendToPhotoshop={sendAssistantPromptToPhotoshop}
         />
       )}
 
