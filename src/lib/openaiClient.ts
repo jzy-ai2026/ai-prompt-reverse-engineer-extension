@@ -108,6 +108,61 @@ export type AssistantResolution = "1K" | "2K" | "4K";
 
 export type AssistantRenderQuality = "sd" | "hd";
 
+export type AssistantLightingRecipeKey =
+  | "shadowShapes"
+  | "shadowTargets"
+  | "shadowEdges"
+  | "contrast"
+  | "shadowSources"
+  | "fillLights";
+
+export type AssistantCompositionRecipeKey =
+  | "shotSize"
+  | "cameraAngle"
+  | "lens"
+  | "structure"
+  | "focalHierarchy"
+  | "artistLogic";
+
+export type AssistantColorRecipeKey =
+  | "dominantPalette"
+  | "shadowColor"
+  | "highlightColor"
+  | "accentColor"
+  | "saturationContrast"
+  | "grading";
+
+export type AssistantRecipeSource = "auto" | "manual";
+
+export type AssistantLightingSource = AssistantRecipeSource;
+
+export interface AssistantLightingRecipe {
+  name: string;
+  promptText: string;
+  negativePrompt?: string;
+  presetId?: string;
+  customText?: string;
+  selectedKeywords?: Partial<Record<AssistantLightingRecipeKey, string[]>>;
+}
+
+export interface AssistantCompositionRecipe {
+  name: string;
+  promptText: string;
+  negativePrompt?: string;
+  presetId?: string;
+  customText?: string;
+  selectedKeywords?: Partial<Record<AssistantCompositionRecipeKey, string[]>>;
+}
+
+export interface AssistantColorRecipe {
+  name: string;
+  promptText: string;
+  negativePrompt?: string;
+  presetId?: string;
+  customText?: string;
+  selectedKeywords?: Partial<Record<AssistantColorRecipeKey, string[]>>;
+}
+
 export interface AssistantPromptReference {
   imageUrl?: string;
   sourceImageUrl?: string;
@@ -144,6 +199,18 @@ export interface AssistantPromptInput {
   seed?: string;
   negativePrompt?: string;
   personalizationCode?: string;
+  compositionRecipe?: AssistantCompositionRecipe;
+  compositionRecipeEnabled?: boolean;
+  autoCompositionEnabled?: boolean;
+  compositionSource?: AssistantRecipeSource;
+  lightingRecipe?: AssistantLightingRecipe;
+  lightingRecipeEnabled?: boolean;
+  autoLightingEnabled?: boolean;
+  lightingSource?: AssistantLightingSource;
+  colorRecipe?: AssistantColorRecipe;
+  colorRecipeEnabled?: boolean;
+  autoColorEnabled?: boolean;
+  colorSource?: AssistantRecipeSource;
   signal?: AbortSignal;
   onProgress?: (event: ApiProgressEvent) => void;
 }
@@ -724,6 +791,42 @@ function createMidjourneyAssistantUserContent(
     input.negativePrompt?.trim()
       ? `Negative prompt requested: ${input.negativePrompt.trim()}`
       : "",
+    input.compositionRecipe?.promptText.trim()
+      ? [
+          `Composition recipe: ${input.compositionRecipe.name.trim() || "Custom composition recipe"}`,
+          `Composition recipe prompt text: ${input.compositionRecipe.promptText.trim()}`,
+          input.compositionRecipe.negativePrompt?.trim()
+            ? `Composition recipe negative constraints: ${input.compositionRecipe.negativePrompt.trim()}`
+            : "",
+          "The final prompt must preserve these selected shot-size, camera, lens, structure, depth, scale, and focal-hierarchy details as visible composition."
+        ]
+          .filter(Boolean)
+          .join("\n")
+      : "",
+    input.lightingRecipe?.promptText.trim()
+      ? [
+          `Lighting recipe: ${input.lightingRecipe.name.trim() || "Custom lighting recipe"}`,
+          `Lighting recipe prompt text: ${input.lightingRecipe.promptText.trim()}`,
+          input.lightingRecipe.negativePrompt?.trim()
+            ? `Lighting recipe negative constraints: ${input.lightingRecipe.negativePrompt.trim()}`
+            : "",
+          "The final prompt must preserve these selected shadow-shape, placement, shadow-edge, light-dark ratio, cast-source, and fill-light details as visible scene structure."
+        ]
+          .filter(Boolean)
+          .join("\n")
+      : "",
+    input.colorRecipe?.promptText.trim()
+      ? [
+          `Color recipe: ${input.colorRecipe.name.trim() || "Custom color recipe"}`,
+          `Color recipe prompt text: ${input.colorRecipe.promptText.trim()}`,
+          input.colorRecipe.negativePrompt?.trim()
+            ? `Color recipe negative constraints: ${input.colorRecipe.negativePrompt.trim()}`
+            : "",
+          "The final prompt must preserve these selected dominant palette, shadow color, highlight color, accent color, saturation, tonal range, and color-grading details."
+        ]
+          .filter(Boolean)
+          .join("\n")
+      : "",
     input.extraSpecs?.trim() ? `Extra specs: ${input.extraSpecs.trim()}` : "",
     "",
     "User idea:",
@@ -757,9 +860,10 @@ function createMidjourneyAssistantUserContent(
     "1. finalPrompt must be one English Midjourney V8.1 prompt only, with all parameters at the end.",
     "2. Include --v 8.1. Do not include --q, --quality, --cref, --cw, --oref, --ow, --draft, --niji, or ::.",
     "3. If a local reference has no public URL, use placeholders like <image-1-url> instead of data URLs.",
-    "4. Return JSON only. Use chineseCheck to explain the prompt and parameter choices in Chinese.",
+    "4. If optional composition, lighting, or color recipes are provided, include their concrete wording in this order in the visual body: composition, lighting, color. Do not replace them with generic cinematic adjectives.",
+    "5. Return JSON only. Use chineseCheck to explain the prompt and parameter choices in Chinese.",
     input.reverseContext
-      ? "5. In chineseCheck, explicitly mention that the reverse-engineered JSON context was used for style, composition, camera, lighting, and color direction."
+      ? "6. In chineseCheck, explicitly mention that the reverse-engineered JSON context was used for style, composition, camera, lighting, and color direction."
       : ""
   ]
     .filter(Boolean)
@@ -869,7 +973,12 @@ function normalizeMidjourneyAssistantResult(
     ]),
     negativeConstraints: mergeUniqueStrings(
       result.negativeConstraints,
-      readNegativePromptItems(input.negativePrompt)
+      [
+        ...readNegativePromptItems(input.negativePrompt),
+        ...readNegativePromptItems(input.compositionRecipe?.negativePrompt),
+        ...readNegativePromptItems(input.lightingRecipe?.negativePrompt),
+        ...readNegativePromptItems(input.colorRecipe?.negativePrompt)
+      ]
     ),
     chineseCheck
   };
@@ -910,6 +1019,12 @@ function sanitizeMidjourneyFinalPrompt(
     .replace(/\s+/g, " ")
     .replace(/[,\s]+$/g, "")
     .trim();
+
+  body = mergeMidjourneyRecipeTextIntoPrompt(body, [
+    input.compositionRecipe?.promptText,
+    input.lightingRecipe?.promptText,
+    input.colorRecipe?.promptText
+  ]);
 
   const referencePrefix = createMidjourneyImagePromptPrefix(input);
   const suffix = createMidjourneyParameterSuffix(
@@ -1001,6 +1116,9 @@ function createMidjourneyParameterSuffix(
   const negativePrompt = normalizeMidjourneyNegativePrompt(
     [
       input.negativePrompt,
+      input.compositionRecipe?.negativePrompt,
+      input.lightingRecipe?.negativePrompt,
+      input.colorRecipe?.negativePrompt,
       input.reverseContext?.negativePrompt,
       existingNegativePrompt
     ]
@@ -1013,6 +1131,33 @@ function createMidjourneyParameterSuffix(
   }
 
   return parts.join(" ");
+}
+
+function mergeMidjourneyRecipeTextIntoPrompt(
+  body: string,
+  recipeTexts: Array<string | undefined>
+): string {
+  const recipeText = recipeTexts
+    .map((item) => item?.trim())
+    .filter(Boolean)
+    .join(", ");
+
+  if (!recipeText) {
+    return body;
+  }
+
+  const normalizedBody = normalizePromptClauseForComparison(body);
+  const missingClauses = splitPromptClauses(recipeText).filter((clause) => {
+    const normalizedClause = normalizePromptClauseForComparison(clause);
+
+    return normalizedClause && !normalizedBody.includes(normalizedClause);
+  });
+
+  if (!missingClauses.length) {
+    return body;
+  }
+
+  return [body, missingClauses.join(", ")].filter(Boolean).join(", ");
 }
 
 function createMidjourneyChecklist(input: AssistantPromptInput): string[] {
@@ -1031,6 +1176,18 @@ function createMidjourneyChecklist(input: AssistantPromptInput): string[] {
 
   if (input.negativePrompt?.trim()) {
     checklist.push("负面参数：已整理到 --no。");
+  }
+
+  if (input.compositionRecipe?.promptText.trim()) {
+    checklist.push(`构图配方：${input.compositionRecipe.name || "自定义构图"} 已写入 MJ Prompt 正文。`);
+  }
+
+  if (input.lightingRecipe?.promptText.trim()) {
+    checklist.push(`光影配方：${input.lightingRecipe.name || "自定义光影"} 已写入 MJ Prompt 正文。`);
+  }
+
+  if (input.colorRecipe?.promptText.trim()) {
+    checklist.push(`配色配方：${input.colorRecipe.name || "自定义配色"} 已写入 MJ Prompt 正文。`);
   }
 
   if (input.reverseContext) {
@@ -1096,6 +1253,21 @@ function normalizeMidjourneyNegativePrompt(value: string | undefined): string {
     .replace(/\s+/g, " ")
     .trim()
     .replace(/[.;，。]+$/g, "");
+}
+
+function splitPromptClauses(value: string): string[] {
+  return value
+    .split(/[,，;\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function normalizePromptClauseForComparison(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function readNegativePromptItems(value: string | undefined): string[] {

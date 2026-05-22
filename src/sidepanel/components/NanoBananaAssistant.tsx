@@ -16,8 +16,15 @@ import { toUserFacingError, type UserFacingError } from "../../lib/errors";
 import type {
   AssistantEngine,
   AssistantAspectRatio,
+  AssistantColorRecipe,
+  AssistantColorRecipeKey,
+  AssistantCompositionRecipe,
+  AssistantCompositionRecipeKey,
+  AssistantLightingRecipe,
+  AssistantLightingRecipeKey,
   AssistantPromptInput,
   AssistantPromptMode,
+  AssistantRecipeSource,
   AssistantPromptResult,
   AssistantReferenceRole,
   AssistantReverseContext,
@@ -224,7 +231,39 @@ type PhotoshopTargetStageId =
 
 const ASSISTANT_DRAFT_STORAGE_KEY = "aiPromptReverseAssistantDraftV1";
 const MJ_PARAMETER_PRESETS_STORAGE_KEY = "aiPromptReverseMjPresetsV1";
+const MJ_COMPOSITION_PRESETS_STORAGE_KEY =
+  "aiPromptReverseMjCompositionPresetsV1";
+const MJ_LIGHTING_PRESETS_STORAGE_KEY = "aiPromptReverseMjLightingPresetsV1";
+const MJ_COLOR_PRESETS_STORAGE_KEY = "aiPromptReverseMjColorPresetsV1";
 const MAX_MJ_PARAMETER_PRESETS = 12;
+const MAX_MJ_COMPOSITION_PRESETS = 24;
+const MAX_MJ_LIGHTING_PRESETS = 24;
+const MAX_MJ_COLOR_PRESETS = 24;
+
+const LIGHTING_RECIPE_KEYS: AssistantLightingRecipeKey[] = [
+  "shadowShapes",
+  "shadowTargets",
+  "shadowEdges",
+  "contrast",
+  "shadowSources",
+  "fillLights"
+];
+const COMPOSITION_RECIPE_KEYS: AssistantCompositionRecipeKey[] = [
+  "shotSize",
+  "cameraAngle",
+  "lens",
+  "structure",
+  "focalHierarchy",
+  "artistLogic"
+];
+const COLOR_RECIPE_KEYS: AssistantColorRecipeKey[] = [
+  "dominantPalette",
+  "shadowColor",
+  "highlightColor",
+  "accentColor",
+  "saturationContrast",
+  "grading"
+];
 
 interface AssistantDraftState {
   engine: AssistantEngine;
@@ -244,6 +283,18 @@ interface AssistantDraftState {
   identityLock: boolean;
   photoshopTargetStageId: PhotoshopTargetStageId;
   extraSpecs: string;
+  compositionRecipeEnabled: boolean;
+  autoCompositionEnabled: boolean;
+  compositionSource: AssistantRecipeSource;
+  compositionRecipe?: AssistantCompositionRecipe;
+  lightingRecipeEnabled: boolean;
+  autoLightingEnabled: boolean;
+  lightingSource: AssistantRecipeSource;
+  lightingRecipe?: AssistantLightingRecipe;
+  colorRecipeEnabled: boolean;
+  autoColorEnabled: boolean;
+  colorSource: AssistantRecipeSource;
+  colorRecipe?: AssistantColorRecipe;
   reverseContext?: AssistantReverseContext;
   result?: AssistantPromptResult | null;
 }
@@ -262,6 +313,572 @@ interface MjParameterPreset {
   personalizationCode: string;
   negativePrompt: string;
 }
+
+interface MjRecipeToken {
+  id: string;
+  label: string;
+  text: string;
+}
+
+interface MjRecipeMatch {
+  presetId: string;
+  reason: string;
+  confidence: number;
+  matchedKeywords: string[];
+}
+
+interface MjRecipeMatchInput {
+  idea: string;
+  extraSpecs: string;
+  reverseContext?: AssistantReverseContext;
+}
+
+type MjCompositionSelections = Record<AssistantCompositionRecipeKey, string[]>;
+
+interface MjCompositionTokenGroup {
+  key: AssistantCompositionRecipeKey;
+  label: string;
+  mode: "multi" | "single";
+  options: MjRecipeToken[];
+}
+
+interface MjCompositionPreset {
+  id: string;
+  name: string;
+  createdAt: string;
+  builtIn: boolean;
+  selectedKeywords: MjCompositionSelections;
+  customText: string;
+  negativePrompt: string;
+}
+
+type MjLightingSelections = Record<AssistantLightingRecipeKey, string[]>;
+
+interface MjLightingTokenGroup {
+  key: AssistantLightingRecipeKey;
+  label: string;
+  mode: "multi" | "single";
+  options: MjRecipeToken[];
+}
+
+interface MjLightingPreset {
+  id: string;
+  name: string;
+  createdAt: string;
+  builtIn: boolean;
+  selectedKeywords: MjLightingSelections;
+  customText: string;
+  negativePrompt: string;
+}
+
+interface MjLightingMatch {
+  presetId: string;
+  reason: string;
+  confidence: number;
+  matchedKeywords: string[];
+}
+
+interface MjLightingMatchInput {
+  idea: string;
+  extraSpecs: string;
+  reverseContext?: AssistantReverseContext;
+}
+
+type MjColorSelections = Record<AssistantColorRecipeKey, string[]>;
+
+interface MjColorTokenGroup {
+  key: AssistantColorRecipeKey;
+  label: string;
+  mode: "multi" | "single";
+  options: MjRecipeToken[];
+}
+
+interface MjColorPreset {
+  id: string;
+  name: string;
+  createdAt: string;
+  builtIn: boolean;
+  selectedKeywords: MjColorSelections;
+  customText: string;
+  negativePrompt: string;
+}
+
+const MJ_COMPOSITION_TOKEN_GROUPS: MjCompositionTokenGroup[] = [
+  {
+    key: "shotSize",
+    label: "景别",
+    mode: "single",
+    options: [
+      { id: "extreme-wide", label: "超远景", text: "extreme wide shot" },
+      { id: "establishing", label: "建立镜头", text: "wide establishing shot" },
+      { id: "medium", label: "中景", text: "medium shot" },
+      { id: "close-foreground", label: "前景近景", text: "close foreground shot" },
+      { id: "extreme-close-up", label: "极近特写", text: "extreme close-up" },
+      { id: "over-shoulder", label: "越肩镜头", text: "over-the-shoulder shot from behind the warrior" }
+    ]
+  },
+  {
+    key: "cameraAngle",
+    label: "机位",
+    mode: "single",
+    options: [
+      { id: "low-angle", label: "低机位", text: "low-angle camera" },
+      { id: "high-angle", label: "高机位", text: "high-angle camera" },
+      { id: "birds-eye", label: "鸟瞰", text: "bird's-eye view" },
+      { id: "worms-eye", label: "虫视角", text: "worm's-eye view" },
+      { id: "slight-dutch", label: "轻微倾斜", text: "subtle tilted frame" },
+      { id: "eye-level", label: "平视", text: "eye-level perspective" }
+    ]
+  },
+  {
+    key: "lens",
+    label: "镜头",
+    mode: "single",
+    options: [
+      { id: "24mm-wide", label: "24mm 广角", text: "24mm wide lens with strong foreground scale contrast" },
+      { id: "30mm-medium-format", label: "30mm 中画幅", text: "30mm medium format lens with stable cinematic perspective" },
+      { id: "35mm-cinema", label: "35mm 电影", text: "35mm cinema lens with natural perspective" },
+      { id: "45mm", label: "45mm", text: "45mm lens with realistic character proportion" },
+      { id: "telephoto", label: "长焦压缩", text: "telephoto compression stacking distant architecture and mountains" },
+      { id: "ultra-wide-forced", label: "超广角强透视", text: "ultra wide-angle forced perspective" }
+    ]
+  },
+  {
+    key: "structure",
+    label: "构图结构",
+    mode: "multi",
+    options: [
+      { id: "depth-layers", label: "前中后景", text: "strong foreground-midground-background layering" },
+      { id: "leading-lines", label: "引导线", text: "stone path forming strong leading lines toward the focal point" },
+      { id: "diagonal", label: "对角线", text: "powerful diagonal composition" },
+      { id: "thirds", label: "三分法", text: "subject placed on the right third" },
+      { id: "frame-within-frame", label: "框中框", text: "frame within a frame created by ancient stone gates and dark timber beams" },
+      { id: "negative-space", label: "负空间", text: "clean negative space around the small figure" },
+      { id: "symmetry", label: "中轴对称", text: "strict symmetrical composition with a central stairway" },
+      { id: "s-curve", label: "S 曲线", text: "S-curve composition leading the eye through water and stone bridges" },
+      { id: "scale-silhouette", label: "尺度剪影", text: "tiny warrior silhouette used as scale reference" },
+      { id: "foreground-occlusion", label: "前景遮挡", text: "out-of-focus foreground elements partially obscuring the frame" }
+    ]
+  },
+  {
+    key: "focalHierarchy",
+    label: "焦点层级",
+    mode: "multi",
+    options: [
+      { id: "clear-focal", label: "清晰层级", text: "clear focal hierarchy" },
+      { id: "one-focal-point", label: "单一焦点", text: "one clear focal point" },
+      { id: "controlled-bg", label: "背景受控", text: "controlled background detail" },
+      { id: "thumbnail-readable", label: "缩略图可读", text: "large readable shapes, environment readable at thumbnail size" }
+    ]
+  },
+  {
+    key: "artistLogic",
+    label: "艺术家构图逻辑",
+    mode: "multi",
+    options: [
+      { id: "mythic-pressure", label: "神怪压迫", text: "grounded Chinese mythic composition, massive idol or monster statue dominating the frame" },
+      { id: "poetic-landmark", label: "诗意地貌", text: "poetic fantasy landscape composition, one monumental landmark against vast natural terrain" },
+      { id: "visual-dev-shapes", label: "大色块读形", text: "visual development composition with large readable shapes and limited deliberate detail zones" },
+      { id: "cinematic-keyframe", label: "电影关键帧", text: "realistic cinematic keyframe composition, camera-first environment design, photobash realism" }
+    ]
+  }
+];
+
+const BUILT_IN_MJ_COMPOSITION_PRESETS: MjCompositionPreset[] = [
+  createBuiltInCompositionPreset("builtin-world-establishing", "3A 武侠世界观远景", {
+    shotSize: ["establishing"],
+    cameraAngle: ["eye-level"],
+    lens: ["telephoto"],
+    structure: ["depth-layers", "negative-space", "scale-silhouette"],
+    focalHierarchy: ["clear-focal", "controlled-bg"],
+    artistLogic: ["poetic-landmark"]
+  }, "foreground willow branches framing the shot, distant temple roofs fading into misty mountains"),
+  createBuiltInCompositionPreset("builtin-boss-shoulder", "BOSS 战越肩镜头", {
+    shotSize: ["over-shoulder"],
+    cameraAngle: ["low-angle"],
+    lens: ["ultra-wide-forced"],
+    structure: ["leading-lines", "symmetry", "scale-silhouette"],
+    focalHierarchy: ["clear-focal"],
+    artistLogic: ["mythic-pressure"]
+  }, "ruined mountain temple gate dominates the distance, foreground shoulder silhouette framing the lower right"),
+  createBuiltInCompositionPreset("builtin-cliff-fortress", "山崖城寨冲击构图", {
+    shotSize: ["close-foreground"],
+    cameraAngle: ["slight-dutch"],
+    lens: ["24mm-wide"],
+    structure: ["diagonal", "leading-lines", "foreground-occlusion", "scale-silhouette"],
+    focalHierarchy: ["clear-focal", "thumbnail-readable"],
+    artistLogic: ["cinematic-keyframe"]
+  }, "dark foreground rocks cutting across the lower frame, cliff edge cutting across the frame"),
+  createBuiltInCompositionPreset("builtin-canal-s-curve", "古城水巷 S 曲线", {
+    shotSize: ["medium"],
+    cameraAngle: ["eye-level"],
+    lens: ["35mm-cinema"],
+    structure: ["s-curve", "foreground-occlusion", "depth-layers"],
+    focalHierarchy: ["one-focal-point"],
+    artistLogic: ["visual-dev-shapes"]
+  }, "foreground umbrellas and hanging cloth signs partially obscuring the frame"),
+  createBuiltInCompositionPreset("builtin-ritual-symmetry", "秘殿对称仪式构图", {
+    shotSize: ["establishing"],
+    cameraAngle: ["eye-level"],
+    lens: ["30mm-medium-format"],
+    structure: ["symmetry", "frame-within-frame", "scale-silhouette"],
+    focalHierarchy: ["clear-focal", "controlled-bg"],
+    artistLogic: ["mythic-pressure"]
+  }, "guardian beast statues mirrored on both sides, subtle mist movement breaking the symmetry"),
+  createBuiltInCompositionPreset("builtin-mythic-gate", "黑神话式神怪山门", {
+    shotSize: ["over-shoulder"],
+    cameraAngle: ["low-angle"],
+    lens: ["24mm-wide"],
+    structure: ["leading-lines", "scale-silhouette", "foreground-occlusion"],
+    focalHierarchy: ["thumbnail-readable", "clear-focal"],
+    artistLogic: ["mythic-pressure"]
+  }, "ritual gate and stone stairs forming strong leading lines, boss arena spatial layout"),
+  createBuiltInCompositionPreset("builtin-ruxing-landscape", "Ruxing Gao 式地貌奇观", {
+    shotSize: ["extreme-wide"],
+    cameraAngle: ["high-angle"],
+    lens: ["30mm-medium-format"],
+    structure: ["s-curve", "negative-space", "scale-silhouette"],
+    focalHierarchy: ["thumbnail-readable", "controlled-bg"],
+    artistLogic: ["poetic-landmark"]
+  }, "large simple terrain shapes, winding river or canyon guiding the eye"),
+  createBuiltInCompositionPreset("builtin-liang-shapes", "Liang Mark 式大形读图", {
+    shotSize: ["establishing"],
+    cameraAngle: ["eye-level"],
+    lens: ["35mm-cinema"],
+    structure: ["depth-layers", "foreground-occlusion"],
+    focalHierarchy: ["thumbnail-readable", "one-focal-point", "controlled-bg"],
+    artistLogic: ["visual-dev-shapes"]
+  }, "graphic foreground silhouette, clean concept art color blocking"),
+  createBuiltInCompositionPreset("builtin-romain-keyframe", "Romain Jouandeau 式电影关键帧", {
+    shotSize: ["medium"],
+    cameraAngle: ["eye-level"],
+    lens: ["24mm-wide"],
+    structure: ["depth-layers", "leading-lines", "foreground-occlusion"],
+    focalHierarchy: ["clear-focal", "controlled-bg"],
+    artistLogic: ["cinematic-keyframe"]
+  }, "3D blockout-like spatial clarity, physically believable terrain and architecture layout")
+];
+
+const MJ_COMPOSITION_MATCH_RULES: Array<{
+  presetId: string;
+  keywords: string[];
+}> = [
+  { presetId: "builtin-world-establishing", keywords: ["世界观", "远景", "大景", "城市", "湖", "open-world", "establishing"] },
+  { presetId: "builtin-boss-shoulder", keywords: ["boss", "BOSS", "对峙", "越肩", "arena", "怪物"] },
+  { presetId: "builtin-cliff-fortress", keywords: ["山崖", "城寨", "堡垒", "冲击", "cliff", "fortress"] },
+  { presetId: "builtin-canal-s-curve", keywords: ["水巷", "杭州", "夜市", "运河", "canal", "market"] },
+  { presetId: "builtin-ritual-symmetry", keywords: ["秘殿", "仪式", "祭坛", "对称", "ritual", "altar"] },
+  { presetId: "builtin-mythic-gate", keywords: ["黑神话", "神怪", "山门", "妖怪", "idol", "mythic"] },
+  { presetId: "builtin-ruxing-landscape", keywords: ["地貌", "奇观", "白塔", "暗河", "峡谷", "landscape", "river"] },
+  { presetId: "builtin-liang-shapes", keywords: ["视觉开发", "大色块", "大形", "读形", "thumbnail", "visual development"] },
+  { presetId: "builtin-romain-keyframe", keywords: ["电影关键帧", "照片参考", "写实", "山谷", "森林", "keyframe", "photobash"] }
+];
+
+const MJ_COLOR_TOKEN_GROUPS: MjColorTokenGroup[] = [
+  {
+    key: "dominantPalette",
+    label: "主色调",
+    mode: "single",
+    options: [
+      { id: "cool-stone-gray", label: "冷灰石色", text: "cool stone-gray dominant palette" },
+      { id: "ink-green", label: "墨绿竹影", text: "muted ink-green and moss-green palette" },
+      { id: "black-bronze", label: "黑石青铜", text: "black stone and oxidized bronze palette" },
+      { id: "white-sand", label: "白沙胡杨", text: "white sand and dry ochre poplar palette" },
+      { id: "rose-gray", label: "玫瑰灰天空", text: "poetic rose-gray sky and pale limestone cliffs" },
+      { id: "rainy-blue-green", label: "雨夜冷青", text: "cool blue-green rain shadows and dark timber storefronts" }
+    ]
+  },
+  {
+    key: "shadowColor",
+    label: "阴影色",
+    mode: "single",
+    options: [
+      { id: "blue-gray", label: "蓝灰暗部", text: "deep blue-gray shadows" },
+      { id: "cool-shadows", label: "冷暗部", text: "deep cool shadows" },
+      { id: "indigo", label: "靛蓝暗部", text: "deep indigo shadows" },
+      { id: "organized-shadow", label: "有组织暗部", text: "deep organized shadow masses" },
+      { id: "cool-rain", label: "冷雨阴影", text: "cool blue rain shadows" }
+    ]
+  },
+  {
+    key: "highlightColor",
+    label: "高光色",
+    mode: "single",
+    options: [
+      { id: "moon-white", label: "月白高光", text: "moon-white highlights" },
+      { id: "pale-silver", label: "银白雾光", text: "pale silver mist light" },
+      { id: "pale-gold", label: "干金阳光", text: "pale gold sunlight" },
+      { id: "warm-amber", label: "暖灯高光", text: "warm amber lantern highlights" },
+      { id: "pearl-white", label: "珍珠白高光", text: "soft pearl-white highlights" }
+    ]
+  },
+  {
+    key: "accentColor",
+    label: "点缀色",
+    mode: "multi",
+    options: [
+      { id: "dark-gold", label: "暗金点缀", text: "small muted dark-gold accents" },
+      { id: "verdigris", label: "铜绿氧化", text: "verdigris green patina accents" },
+      { id: "restrained-crimson", label: "克制赤色", text: "restrained crimson accents only on talismans" },
+      { id: "muted-gold-city", label: "金色古城", text: "muted gold ancient city accents" },
+      { id: "localized-warm", label: "局部暖光", text: "localized warm color around the focal point" },
+      { id: "pale-cyan", label: "浅青幻想光", text: "small pale cyan magical accents" }
+    ]
+  },
+  {
+    key: "saturationContrast",
+    label: "饱和 / 对比",
+    mode: "multi",
+    options: [
+      { id: "desaturated", label: "低饱和", text: "desaturated cinematic grading" },
+      { id: "controlled-depth", label: "克制色深", text: "rich but controlled color depth" },
+      { id: "low-saturation", label: "自然低饱和", text: "low saturation" },
+      { id: "high-contrast", label: "高反差低调", text: "high contrast low-key grading" },
+      { id: "clean-separation", label: "明度分离", text: "clear value separation" },
+      { id: "controlled-saturation", label: "饱和受控", text: "controlled saturation" }
+    ]
+  },
+  {
+    key: "grading",
+    label: "电影调色",
+    mode: "multi",
+    options: [
+      { id: "natural-material", label: "真实材质色", text: "natural material colors" },
+      { id: "highlight-rolloff", label: "自然高光过渡", text: "natural highlight roll-off" },
+      { id: "dark-fantasy", label: "暗黑武侠", text: "grounded Chinese dark fantasy palette" },
+      { id: "concept-color-blocking", label: "概念大色块", text: "clean concept art color blocking" },
+      { id: "dreamlike-grounded", label: "梦境但落地", text: "dreamlike but grounded fantasy palette" },
+      { id: "wet-reflections", label: "湿石反光", text: "wet stone reflections" }
+    ]
+  }
+];
+
+const COLOR_NEGATIVE_PROMPT =
+  "cyberpunk, neon, overly saturated colors, candy colors, colorful fantasy game UI, bright red pillars, vermilion palace paint, plastic-looking materials";
+
+const BUILT_IN_MJ_COLOR_PRESETS: MjColorPreset[] = [
+  createBuiltInColorPreset("builtin-stone-moon-gold", "冷灰石色月白暗金", {
+    dominantPalette: ["cool-stone-gray"],
+    shadowColor: ["blue-gray"],
+    highlightColor: ["moon-white"],
+    accentColor: ["dark-gold"],
+    saturationContrast: ["desaturated", "controlled-depth"],
+    grading: ["natural-material", "highlight-rolloff"]
+  }, "aged dark timber and oxidized bronze material colors", COLOR_NEGATIVE_PROMPT),
+  createBuiltInColorPreset("builtin-ink-green-silver", "墨绿竹影银白雾光", {
+    dominantPalette: ["ink-green"],
+    shadowColor: ["cool-shadows"],
+    highlightColor: ["pale-silver"],
+    accentColor: [],
+    saturationContrast: ["low-saturation"],
+    grading: ["natural-material"]
+  }, "soft jade reflections, clean natural color harmony", COLOR_NEGATIVE_PROMPT),
+  createBuiltInColorPreset("builtin-black-bronze-gold", "黑石青铜暖金宗教光", {
+    dominantPalette: ["black-bronze"],
+    shadowColor: ["organized-shadow"],
+    highlightColor: ["warm-amber"],
+    accentColor: ["verdigris", "restrained-crimson"],
+    saturationContrast: ["high-contrast"],
+    grading: ["dark-fantasy"]
+  }, "small warm gold ritual highlights", COLOR_NEGATIVE_PROMPT),
+  createBuiltInColorPreset("builtin-white-sand-poplar", "白沙胡杨干金阳光", {
+    dominantPalette: ["white-sand"],
+    shadowColor: ["indigo"],
+    highlightColor: ["pale-gold"],
+    accentColor: [],
+    saturationContrast: ["desaturated"],
+    grading: ["natural-material"]
+  }, "washed-out sky, desaturated epic landscape grading", COLOR_NEGATIVE_PROMPT),
+  createBuiltInColorPreset("builtin-rose-river-gold", "玫瑰灰天空暗河金城", {
+    dominantPalette: ["rose-gray"],
+    shadowColor: ["cool-shadows"],
+    highlightColor: ["pearl-white"],
+    accentColor: ["muted-gold-city", "pale-cyan"],
+    saturationContrast: ["controlled-depth", "clean-separation"],
+    grading: ["dreamlike-grounded"]
+  }, "dark river reflections, soft atmospheric color gradients", COLOR_NEGATIVE_PROMPT),
+  createBuiltInColorPreset("builtin-rain-lantern", "雨夜暖灯冷青街巷", {
+    dominantPalette: ["rainy-blue-green"],
+    shadowColor: ["cool-rain"],
+    highlightColor: ["warm-amber"],
+    accentColor: ["localized-warm"],
+    saturationContrast: ["controlled-saturation"],
+    grading: ["wet-reflections", "highlight-rolloff"]
+  }, "dark timber storefronts, controlled color spill on wet stone", COLOR_NEGATIVE_PROMPT)
+];
+
+const MJ_COLOR_MATCH_RULES: Array<{
+  presetId: string;
+  keywords: string[];
+}> = [
+  { presetId: "builtin-stone-moon-gold", keywords: ["山门", "城寨", "遗迹", "石", "寺", "fortress", "stone"] },
+  { presetId: "builtin-ink-green-silver", keywords: ["竹林", "山寺", "森林", "潮湿", "bamboo", "forest"] },
+  { presetId: "builtin-black-bronze-gold", keywords: ["boss", "BOSS", "秘殿", "祭坛", "青铜", "仪式", "ritual", "bronze"] },
+  { presetId: "builtin-white-sand-poplar", keywords: ["白沙", "沙漠", "胡杨", "雪", "边塞", "desert", "snow"] },
+  { presetId: "builtin-rose-river-gold", keywords: ["梦境", "暗河", "白塔", "古城", "奇观", "river", "pagoda"] },
+  { presetId: "builtin-rain-lantern", keywords: ["雨夜", "灯笼", "夜市", "水巷", "杭州", "rain", "lantern", "canal"] }
+];
+
+
+const MJ_LIGHTING_TOKEN_GROUPS: MjLightingTokenGroup[] = [
+  {
+    key: "shadowShapes",
+    label: "阴影形状",
+    mode: "multi",
+    options: [
+      { id: "long-diagonal", label: "长斜影", text: "long diagonal shadows" },
+      { id: "broken-bamboo-leaf", label: "竹叶碎影", text: "broken bamboo leaf shadows" },
+      { id: "dappled", label: "斑驳光影", text: "dappled shadows" },
+      { id: "lattice", label: "窗棂影", text: "lattice shadows" },
+      { id: "blocky-architecture", label: "建筑大块影", text: "blocky architectural shadows" },
+      { id: "blade-like", label: "刀锋细影", text: "thin blade-like shadow" },
+      { id: "negative-mass", label: "大块暗部", text: "large negative shadow mass" }
+    ]
+  },
+  {
+    key: "shadowTargets",
+    label: "落点",
+    mode: "multi",
+    options: [
+      { id: "face", label: "脸部", text: "across the warrior's face" },
+      { id: "robe", label: "衣服", text: "across the robe and fabric folds" },
+      { id: "wet-stone", label: "湿石板", text: "across the wet stone path" },
+      { id: "wall", label: "墙面", text: "projected onto the ancient wall" },
+      { id: "steps", label: "台阶", text: "falling across wet stone steps" },
+      { id: "snow", label: "雪地", text: "stretching over the white snowfield" },
+      { id: "water", label: "水面", text: "reflected across still water" },
+      { id: "mist-bg", label: "雾中背景", text: "fading into the misty background" }
+    ]
+  },
+  {
+    key: "shadowEdges",
+    label: "边缘",
+    mode: "single",
+    options: [
+      { id: "hard-edged", label: "硬边", text: "hard-edged" },
+      { id: "soft-edged", label: "软边", text: "soft-edged" },
+      { id: "feathered", label: "羽化边缘", text: "feathered-edge" },
+      { id: "crisp-falloff", label: "清晰衰减", text: "crisp falloff" }
+    ]
+  },
+  {
+    key: "contrast",
+    label: "明暗比例",
+    mode: "single",
+    options: [
+      { id: "half-face", label: "半脸阴影", text: "half of the face hidden in deep cool shadow" },
+      { id: "bright-dark-zones", label: "明暗分区", text: "dividing the scene into bright and dark zones" },
+      { id: "large-dark-mass", label: "大面积暗部", text: "a large negative shadow mass swallowing one side of the frame" },
+      { id: "small-highlights", label: "小面积高光", text: "small bright highlights catching the wet material edges" }
+    ]
+  },
+  {
+    key: "shadowSources",
+    label: "投影来源",
+    mode: "multi",
+    options: [
+      { id: "bamboo-leaves", label: "竹叶", text: "cast by bamboo leaves" },
+      { id: "roof-eaves", label: "屋檐", text: "cast by roof eaves" },
+      { id: "lattice-window", label: "窗棂", text: "from carved lattice windows" },
+      { id: "wooden-screen", label: "木雕屏风", text: "from carved wooden screens" },
+      { id: "stone-gate", label: "城门", text: "cast by a massive stone gate" },
+      { id: "tree-branches", label: "树枝", text: "cast by bare tree branches" },
+      { id: "statue", label: "雕像", text: "cast by ancient statues" }
+    ]
+  },
+  {
+    key: "fillLights",
+    label: "补光",
+    mode: "multi",
+    options: [
+      { id: "warm-rim", label: "暖边缘光", text: "thin warm rim light outlining the shoulders and weapon" },
+      { id: "cool-ambient", label: "冷环境光", text: "cool blue ambient shadows in the background" },
+      { id: "water-highlights", label: "水面高光", text: "moon-white highlights on water reflections" },
+      { id: "small-highlights", label: "小面积高光", text: "small controlled highlights separating the silhouette from darkness" }
+    ]
+  }
+];
+
+const BUILT_IN_MJ_LIGHTING_PRESETS: MjLightingPreset[] = [
+  createBuiltInLightingPreset("builtin-bamboo-wuxia", "竹林武侠", {
+    shadowShapes: ["broken-bamboo-leaf", "long-diagonal"],
+    shadowTargets: ["robe", "wet-stone", "mist-bg"],
+    shadowEdges: ["soft-edged"],
+    contrast: ["half-face"],
+    shadowSources: ["bamboo-leaves"],
+    fillLights: ["warm-rim"]
+  }, "soft-edged shadows fading into the fog", "red pillars, bright red columns, red lacquered architecture"),
+  createBuiltInLightingPreset("builtin-hangzhou-temple", "古杭州水边寺院", {
+    shadowShapes: ["lattice"],
+    shadowTargets: ["steps", "water", "mist-bg"],
+    shadowEdges: ["crisp-falloff"],
+    contrast: ["bright-dark-zones"],
+    shadowSources: ["lattice-window", "roof-eaves"],
+    fillLights: ["water-highlights", "cool-ambient"]
+  }, "deep shadow pockets under black tiled eaves", "red lacquered architecture, neon, sci-fi"),
+  createBuiltInLightingPreset("builtin-night-market", "古城夜市", {
+    shadowShapes: ["blocky-architecture"],
+    shadowTargets: ["wet-stone", "wall"],
+    shadowEdges: ["soft-edged"],
+    contrast: ["small-highlights"],
+    shadowSources: ["roof-eaves"],
+    fillLights: ["cool-ambient", "small-highlights"]
+  }, "warm lantern rectangles reflected in puddles, deep shadow pockets beneath wooden balconies", "modern signage, neon cyberpunk, UI"),
+  createBuiltInLightingPreset("builtin-ruins-boss", "遗迹废墟 / BOSS 场", {
+    shadowShapes: ["blocky-architecture", "blade-like", "negative-mass"],
+    shadowTargets: ["face", "wall", "wet-stone"],
+    shadowEdges: ["hard-edged"],
+    contrast: ["large-dark-mass"],
+    shadowSources: ["stone-gate", "statue"],
+    fillLights: ["warm-rim", "cool-ambient"]
+  }, "massive stone gate shadows dividing the arena into bright and dark zones", "blood, gore, red lacquered architecture, text, logo"),
+  createBuiltInLightingPreset("builtin-snowfield", "雪景大场面", {
+    shadowShapes: ["long-diagonal", "negative-mass"],
+    shadowTargets: ["snow"],
+    shadowEdges: ["soft-edged"],
+    contrast: ["small-highlights"],
+    shadowSources: ["tree-branches"],
+    fillLights: ["cool-ambient", "small-highlights"]
+  }, "subtle contact shadows under boots on snow, small dark figure silhouette isolated in open negative space", "warm desert, tropical forest, neon"),
+  createBuiltInLightingPreset("builtin-ritual-interior", "室内秘殿", {
+    shadowShapes: ["lattice", "blocky-architecture", "negative-mass"],
+    shadowTargets: ["wall", "wet-stone"],
+    shadowEdges: ["hard-edged"],
+    contrast: ["large-dark-mass"],
+    shadowSources: ["wooden-screen", "statue"],
+    fillLights: ["warm-rim"]
+  }, "red ritual light blocked into rectangular shadow zones, gobo shadows projected onto the stone floor", "modern interior, office light, UI, logo")
+];
+
+const MJ_LIGHTING_MATCH_RULES: Array<{
+  presetId: string;
+  keywords: string[];
+}> = [
+  {
+    presetId: "builtin-bamboo-wuxia",
+    keywords: ["竹林", "竹", "bamboo", "forest"]
+  },
+  {
+    presetId: "builtin-hangzhou-temple",
+    keywords: ["杭州", "湖", "水边", "寺", "桥", "water", "temple", "lake"]
+  },
+  {
+    presetId: "builtin-night-market",
+    keywords: ["夜市", "灯笼", "街市", "lantern", "market"]
+  },
+  {
+    presetId: "builtin-ruins-boss",
+    keywords: ["废墟", "boss", "BOSS", "遗迹", "arena", "statue", "monster"]
+  },
+  {
+    presetId: "builtin-snowfield",
+    keywords: ["雪", "雪山", "堡垒", "snow", "fortress"]
+  },
+  {
+    presetId: "builtin-ritual-interior",
+    keywords: ["室内", "秘殿", "祭坛", "仪式", "altar", "ritual", "interior"]
+  }
+];
 
 export function NanoBananaAssistant({
   mixImages,
@@ -319,8 +936,77 @@ export function NanoBananaAssistant({
   const [photoshopTargetStageId, setPhotoshopTargetStageId] =
     useState<PhotoshopTargetStageId>(
       assistantDraft?.photoshopTargetStageId ?? ""
-    );
+  );
   const [extraSpecs, setExtraSpecs] = useState(assistantDraft?.extraSpecs ?? "");
+  const [compositionRecipeEnabled, setCompositionRecipeEnabled] = useState(
+    assistantDraft?.compositionRecipeEnabled ?? false
+  );
+  const [autoCompositionEnabled, setAutoCompositionEnabled] = useState(
+    assistantDraft?.autoCompositionEnabled ?? true
+  );
+  const [compositionSource, setCompositionSource] = useState<AssistantRecipeSource>(
+    assistantDraft?.compositionSource ??
+      (assistantDraft?.compositionRecipe?.promptText ? "manual" : "auto")
+  );
+  const [compositionPresetId, setCompositionPresetId] = useState(
+    assistantDraft?.compositionRecipe?.presetId ?? ""
+  );
+  const [compositionSelections, setCompositionSelections] =
+    useState<MjCompositionSelections>(() =>
+      createCompositionSelectionsFromRecipe(assistantDraft?.compositionRecipe)
+    );
+  const [compositionCustomText, setCompositionCustomText] = useState(
+    assistantDraft?.compositionRecipe?.customText ?? ""
+  );
+  const [compositionNegativePrompt, setCompositionNegativePrompt] = useState(
+    assistantDraft?.compositionRecipe?.negativePrompt ?? ""
+  );
+  const [lightingRecipeEnabled, setLightingRecipeEnabled] = useState(
+    assistantDraft?.lightingRecipeEnabled ??
+      Boolean(assistantDraft?.lightingRecipe?.promptText)
+  );
+  const [autoLightingEnabled, setAutoLightingEnabled] = useState(
+    assistantDraft?.autoLightingEnabled ?? true
+  );
+  const [lightingSource, setLightingSource] = useState<AssistantRecipeSource>(
+    assistantDraft?.lightingSource ??
+      (assistantDraft?.lightingRecipe?.promptText ? "manual" : "auto")
+  );
+  const [lightingPresetId, setLightingPresetId] = useState(
+    assistantDraft?.lightingRecipe?.presetId ?? ""
+  );
+  const [lightingSelections, setLightingSelections] =
+    useState<MjLightingSelections>(() =>
+      createLightingSelectionsFromRecipe(assistantDraft?.lightingRecipe)
+    );
+  const [lightingCustomText, setLightingCustomText] = useState(
+    assistantDraft?.lightingRecipe?.customText ?? ""
+  );
+  const [lightingNegativePrompt, setLightingNegativePrompt] = useState(
+    assistantDraft?.lightingRecipe?.negativePrompt ?? ""
+  );
+  const [colorRecipeEnabled, setColorRecipeEnabled] = useState(
+    assistantDraft?.colorRecipeEnabled ?? false
+  );
+  const [autoColorEnabled, setAutoColorEnabled] = useState(
+    assistantDraft?.autoColorEnabled ?? true
+  );
+  const [colorSource, setColorSource] = useState<AssistantRecipeSource>(
+    assistantDraft?.colorSource ??
+      (assistantDraft?.colorRecipe?.promptText ? "manual" : "auto")
+  );
+  const [colorPresetId, setColorPresetId] = useState(
+    assistantDraft?.colorRecipe?.presetId ?? ""
+  );
+  const [colorSelections, setColorSelections] = useState<MjColorSelections>(() =>
+    createColorSelectionsFromRecipe(assistantDraft?.colorRecipe)
+  );
+  const [colorCustomText, setColorCustomText] = useState(
+    assistantDraft?.colorRecipe?.customText ?? ""
+  );
+  const [colorNegativePrompt, setColorNegativePrompt] = useState(
+    assistantDraft?.colorRecipe?.negativePrompt ?? ""
+  );
   const [fallbackReverseContext, setFallbackReverseContext] = useState<
     AssistantReverseContext | undefined
   >(assistantDraft?.reverseContext);
@@ -332,6 +1018,9 @@ export function NanoBananaAssistant({
   );
   const [history, setHistory] = useState<AssistantHistoryItem[]>([]);
   const [favorites, setFavorites] = useState<AssistantFavoriteItem[]>([]);
+  const [libraryTab, setLibraryTab] = useState<"favorites" | "history">(
+    "favorites"
+  );
   const [error, setError] = useState<UserFacingError | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isReadingReferences, setIsReadingReferences] = useState(false);
@@ -349,7 +1038,242 @@ export function NanoBananaAssistant({
     readMjParameterPresets
   );
   const [selectedMjPresetId, setSelectedMjPresetId] = useState("");
+  const [customLightingPresets, setCustomLightingPresets] = useState<
+    MjLightingPreset[]
+  >(readMjLightingPresets);
+  const [customCompositionPresets, setCustomCompositionPresets] = useState<
+    MjCompositionPreset[]
+  >(readMjCompositionPresets);
+  const [customColorPresets, setCustomColorPresets] = useState<MjColorPreset[]>(
+    readMjColorPresets
+  );
   const activeReverseContext = reverseContext ?? fallbackReverseContext;
+  const isMidjourney = engine === "midjourney-v8.1";
+  const compositionPresets = useMemo(
+    () => [...BUILT_IN_MJ_COMPOSITION_PRESETS, ...customCompositionPresets],
+    [customCompositionPresets]
+  );
+  const lightingPresets = useMemo(
+    () => [...BUILT_IN_MJ_LIGHTING_PRESETS, ...customLightingPresets],
+    [customLightingPresets]
+  );
+  const colorPresets = useMemo(
+    () => [...BUILT_IN_MJ_COLOR_PRESETS, ...customColorPresets],
+    [customColorPresets]
+  );
+  const autoCompositionMatch = useMemo(
+    () =>
+      matchMjPreset(
+        {
+          idea,
+          extraSpecs,
+          reverseContext: activeReverseContext
+        },
+        MJ_COMPOSITION_MATCH_RULES
+      ),
+    [activeReverseContext, extraSpecs, idea]
+  );
+  const autoCompositionPreset = autoCompositionMatch
+    ? BUILT_IN_MJ_COMPOSITION_PRESETS.find(
+        (preset) => preset.id === autoCompositionMatch.presetId
+      )
+    : undefined;
+  const isAutoCompositionActive =
+    isMidjourney &&
+    autoCompositionEnabled &&
+    compositionSource === "auto" &&
+    Boolean(autoCompositionPreset);
+  const effectiveCompositionSelections = isAutoCompositionActive
+    ? autoCompositionPreset!.selectedKeywords
+    : compositionSelections;
+  const effectiveCompositionCustomText = isAutoCompositionActive
+    ? autoCompositionPreset!.customText
+    : compositionCustomText;
+  const effectiveCompositionNegativePrompt = isAutoCompositionActive
+    ? autoCompositionPreset!.negativePrompt
+    : compositionNegativePrompt;
+  const effectiveCompositionPreset = isAutoCompositionActive
+    ? autoCompositionPreset
+    : compositionPresets.find((preset) => preset.id === compositionPresetId);
+  const compositionPromptPreview = useMemo(
+    () =>
+      buildMjCompositionPrompt(
+        effectiveCompositionSelections,
+        effectiveCompositionCustomText
+      ),
+    [effectiveCompositionCustomText, effectiveCompositionSelections]
+  );
+  const currentCompositionRecipe = useMemo<AssistantCompositionRecipe | undefined>(() => {
+    if (!compositionPromptPreview) {
+      return undefined;
+    }
+
+    return {
+      name: effectiveCompositionPreset?.name ?? "自定义构图",
+      presetId: effectiveCompositionPreset?.id || compositionPresetId || undefined,
+      promptText: compositionPromptPreview,
+      negativePrompt: effectiveCompositionNegativePrompt.trim() || undefined,
+      customText: effectiveCompositionCustomText.trim() || undefined,
+      selectedKeywords: createCompositionRecipeKeywords(
+        effectiveCompositionSelections
+      )
+    };
+  }, [
+    compositionPresetId,
+    compositionPromptPreview,
+    effectiveCompositionCustomText,
+    effectiveCompositionNegativePrompt,
+    effectiveCompositionPreset?.id,
+    effectiveCompositionPreset?.name,
+    effectiveCompositionSelections
+  ]);
+  const activeCompositionRecipe =
+    isMidjourney && compositionRecipeEnabled
+      ? currentCompositionRecipe
+      : undefined;
+  const selectedCustomCompositionPreset = customCompositionPresets.find(
+    (preset) => preset.id === compositionPresetId
+  );
+  const autoLightingMatch = useMemo(
+    () =>
+      matchMjLightingPreset({
+        idea,
+        extraSpecs,
+        reverseContext: activeReverseContext
+      }),
+    [activeReverseContext, extraSpecs, idea]
+  );
+  const autoLightingPreset = autoLightingMatch
+    ? BUILT_IN_MJ_LIGHTING_PRESETS.find(
+        (preset) => preset.id === autoLightingMatch.presetId
+      )
+    : undefined;
+  const isAutoLightingActive =
+    isMidjourney &&
+    autoLightingEnabled &&
+    lightingSource === "auto" &&
+    Boolean(autoLightingPreset);
+  const effectiveLightingSelections = isAutoLightingActive
+    ? autoLightingPreset!.selectedKeywords
+    : lightingSelections;
+  const effectiveLightingCustomText = isAutoLightingActive
+    ? autoLightingPreset!.customText
+    : lightingCustomText;
+  const effectiveLightingNegativePrompt = isAutoLightingActive
+    ? autoLightingPreset!.negativePrompt
+    : lightingNegativePrompt;
+  const effectiveLightingPreset = isAutoLightingActive
+    ? autoLightingPreset
+    : lightingPresets.find((preset) => preset.id === lightingPresetId);
+  const lightingPromptPreview = useMemo(
+    () =>
+      buildMjLightingPrompt(
+        effectiveLightingSelections,
+        effectiveLightingCustomText
+      ),
+    [effectiveLightingCustomText, effectiveLightingSelections]
+  );
+  const currentLightingRecipe = useMemo<AssistantLightingRecipe | undefined>(() => {
+    if (!lightingPromptPreview) {
+      return undefined;
+    }
+
+    return {
+      name: effectiveLightingPreset?.name ?? "自定义光影",
+      presetId: effectiveLightingPreset?.id || lightingPresetId || undefined,
+      promptText: lightingPromptPreview,
+      negativePrompt: effectiveLightingNegativePrompt.trim() || undefined,
+      customText: effectiveLightingCustomText.trim() || undefined,
+      selectedKeywords: createLightingRecipeKeywords(effectiveLightingSelections)
+    };
+  }, [
+    effectiveLightingCustomText,
+    effectiveLightingNegativePrompt,
+    effectiveLightingPreset?.id,
+    effectiveLightingPreset?.name,
+    effectiveLightingSelections,
+    lightingPresetId,
+    lightingPromptPreview
+  ]);
+  const activeLightingRecipe =
+    isMidjourney &&
+    lightingRecipeEnabled
+      ? currentLightingRecipe
+      : undefined;
+  const selectedCustomLightingPreset = customLightingPresets.find(
+    (preset) => preset.id === lightingPresetId
+  );
+  const autoColorMatch = useMemo(
+    () =>
+      matchMjPreset(
+        {
+          idea,
+          extraSpecs,
+          reverseContext: activeReverseContext
+        },
+        MJ_COLOR_MATCH_RULES
+      ),
+    [activeReverseContext, extraSpecs, idea]
+  );
+  const autoColorPreset = autoColorMatch
+    ? BUILT_IN_MJ_COLOR_PRESETS.find(
+        (preset) => preset.id === autoColorMatch.presetId
+      )
+    : undefined;
+  const isAutoColorActive =
+    isMidjourney &&
+    autoColorEnabled &&
+    colorSource === "auto" &&
+    Boolean(autoColorPreset);
+  const effectiveColorSelections = isAutoColorActive
+    ? autoColorPreset!.selectedKeywords
+    : colorSelections;
+  const effectiveColorCustomText = isAutoColorActive
+    ? autoColorPreset!.customText
+    : colorCustomText;
+  const effectiveColorNegativePrompt = isAutoColorActive
+    ? autoColorPreset!.negativePrompt
+    : colorNegativePrompt;
+  const effectiveColorPreset = isAutoColorActive
+    ? autoColorPreset
+    : colorPresets.find((preset) => preset.id === colorPresetId);
+  const colorPromptPreview = useMemo(
+    () =>
+      buildMjColorPrompt(
+        effectiveColorSelections,
+        effectiveColorCustomText
+      ),
+    [effectiveColorCustomText, effectiveColorSelections]
+  );
+  const currentColorRecipe = useMemo<AssistantColorRecipe | undefined>(() => {
+    if (!colorPromptPreview) {
+      return undefined;
+    }
+
+    return {
+      name: effectiveColorPreset?.name ?? "自定义配色",
+      presetId: effectiveColorPreset?.id || colorPresetId || undefined,
+      promptText: colorPromptPreview,
+      negativePrompt: effectiveColorNegativePrompt.trim() || undefined,
+      customText: effectiveColorCustomText.trim() || undefined,
+      selectedKeywords: createColorRecipeKeywords(effectiveColorSelections)
+    };
+  }, [
+    colorPresetId,
+    colorPromptPreview,
+    effectiveColorCustomText,
+    effectiveColorNegativePrompt,
+    effectiveColorPreset?.id,
+    effectiveColorPreset?.name,
+    effectiveColorSelections
+  ]);
+  const activeColorRecipe =
+    isMidjourney && colorRecipeEnabled
+      ? currentColorRecipe
+      : undefined;
+  const selectedCustomColorPreset = customColorPresets.find(
+    (preset) => preset.id === colorPresetId
+  );
 
   useEffect(() => {
     void onGetHistory().then(setHistory).catch(() => setHistory([]));
@@ -384,18 +1308,42 @@ export function NanoBananaAssistant({
       identityLock,
       photoshopTargetStageId,
       extraSpecs,
+      compositionRecipeEnabled,
+      autoCompositionEnabled,
+      compositionSource,
+      compositionRecipe: currentCompositionRecipe,
+      lightingRecipeEnabled,
+      autoLightingEnabled,
+      lightingSource,
+      lightingRecipe: currentLightingRecipe,
+      colorRecipeEnabled,
+      autoColorEnabled,
+      colorSource,
+      colorRecipe: currentColorRecipe,
       reverseContext: activeReverseContext,
       result
     });
   }, [
     activeReverseContext,
     aspectRatio,
+    autoColorEnabled,
+    autoCompositionEnabled,
+    autoLightingEnabled,
     chaos,
+    colorRecipeEnabled,
+    colorSource,
+    compositionRecipeEnabled,
+    compositionSource,
+    currentColorRecipe,
+    currentCompositionRecipe,
+    currentLightingRecipe,
     engine,
     extraSpecs,
     idea,
     identityLock,
     isStylizeDirty,
+    lightingRecipeEnabled,
+    lightingSource,
     mode,
     negativePrompt,
     personalizationCode,
@@ -412,6 +1360,18 @@ export function NanoBananaAssistant({
   useEffect(() => {
     writeMjParameterPresets(mjPresets);
   }, [mjPresets]);
+
+  useEffect(() => {
+    writeMjCompositionPresets(customCompositionPresets);
+  }, [customCompositionPresets]);
+
+  useEffect(() => {
+    writeMjLightingPresets(customLightingPresets);
+  }, [customLightingPresets]);
+
+  useEffect(() => {
+    writeMjColorPresets(customColorPresets);
+  }, [customColorPresets]);
 
   useEffect(() => {
     setReferenceRoles((current) => {
@@ -458,7 +1418,6 @@ export function NanoBananaAssistant({
     [mixImages, referenceRoles]
   );
 
-  const isMidjourney = engine === "midjourney-v8.1";
   const normalizedMjAspectRatio = normalizeAssistantAspectRatio(aspectRatio);
   const aspectRatioError =
     isMidjourney && !normalizedMjAspectRatio
@@ -616,7 +1575,21 @@ export function NanoBananaAssistant({
       negativePrompt: isMidjourney ? negativePrompt.trim() || undefined : undefined,
       personalizationCode: isMidjourney
         ? personalizationCode.trim() || undefined
-        : undefined
+        : undefined,
+      compositionRecipe: isMidjourney ? activeCompositionRecipe : undefined,
+      compositionRecipeEnabled: isMidjourney
+        ? compositionRecipeEnabled
+        : undefined,
+      autoCompositionEnabled: isMidjourney ? autoCompositionEnabled : undefined,
+      compositionSource: isMidjourney ? compositionSource : undefined,
+      lightingRecipe: isMidjourney ? activeLightingRecipe : undefined,
+      lightingRecipeEnabled: isMidjourney ? lightingRecipeEnabled : undefined,
+      autoLightingEnabled: isMidjourney ? autoLightingEnabled : undefined,
+      lightingSource: isMidjourney ? lightingSource : undefined,
+      colorRecipe: isMidjourney ? activeColorRecipe : undefined,
+      colorRecipeEnabled: isMidjourney ? colorRecipeEnabled : undefined,
+      autoColorEnabled: isMidjourney ? autoColorEnabled : undefined,
+      colorSource: isMidjourney ? colorSource : undefined
     };
   }
 
@@ -708,6 +1681,391 @@ export function NanoBananaAssistant({
     setSelectedMjPresetId("");
   }
 
+  function toggleCompositionToken(
+    group: MjCompositionTokenGroup,
+    tokenId: string
+  ) {
+    markCompositionManual();
+    setCompositionSelections((current) => {
+      const base = isAutoCompositionActive
+        ? cloneCompositionSelections(effectiveCompositionSelections)
+        : current;
+      const selected = base[group.key];
+      const isSelected = selected.includes(tokenId);
+      const nextValues =
+        group.mode === "single"
+          ? isSelected
+            ? []
+            : [tokenId]
+          : isSelected
+            ? selected.filter((item) => item !== tokenId)
+            : [...selected, tokenId];
+
+      return {
+        ...base,
+        [group.key]: nextValues
+      };
+    });
+    setCompositionPresetId("");
+  }
+
+  function markCompositionManual() {
+    setCompositionSource("manual");
+  }
+
+  function resetAutoCompositionMatch() {
+    setAutoCompositionEnabled(true);
+    setCompositionSource("auto");
+  }
+
+  function handleCompositionEnabledChange(checked: boolean) {
+    setCompositionRecipeEnabled(checked);
+
+    if (!checked) {
+      setCompositionSource("manual");
+    } else if (autoCompositionEnabled && autoCompositionPreset) {
+      setCompositionSource("auto");
+    }
+  }
+
+  function handleAutoCompositionEnabledChange(checked: boolean) {
+    setAutoCompositionEnabled(checked);
+    setCompositionSource(checked ? "auto" : "manual");
+  }
+
+  function applyCompositionPreset(presetId: string) {
+    if (isAutoCompositionActive) {
+      setCompositionSelections(
+        cloneCompositionSelections(effectiveCompositionSelections)
+      );
+      setCompositionCustomText(effectiveCompositionCustomText);
+      setCompositionNegativePrompt(effectiveCompositionNegativePrompt);
+    }
+
+    markCompositionManual();
+    setCompositionPresetId(presetId);
+
+    const preset = compositionPresets.find((item) => item.id === presetId);
+
+    if (!preset) {
+      return;
+    }
+
+    setCompositionRecipeEnabled(true);
+    setCompositionSelections(cloneCompositionSelections(preset.selectedKeywords));
+    setCompositionCustomText(preset.customText);
+    setCompositionNegativePrompt(preset.negativePrompt);
+  }
+
+  function saveCurrentCompositionPreset() {
+    if (!compositionPromptPreview.trim()) {
+      setError({
+        code: "missing_config",
+        title: "缺少构图配方",
+        message: "请先选择至少一个构图关键词，或填写自定义构图短句。",
+        canRetry: false
+      });
+      return;
+    }
+
+    const fallbackName = effectiveCompositionPreset?.builtIn
+      ? `${effectiveCompositionPreset.name} 副本`
+      : effectiveCompositionPreset?.name || "我的构图配方";
+    const name = window.prompt("构图预设名称", fallbackName)?.trim();
+
+    if (!name) {
+      return;
+    }
+
+    const previous = customCompositionPresets.find((item) => item.name === name);
+    const preset: MjCompositionPreset = {
+      id: previous?.id ?? createCompositionPresetId(),
+      name,
+      createdAt: previous?.createdAt ?? new Date().toISOString(),
+      builtIn: false,
+      selectedKeywords: cloneCompositionSelections(
+        effectiveCompositionSelections
+      ),
+      customText: effectiveCompositionCustomText.trim(),
+      negativePrompt: effectiveCompositionNegativePrompt.trim()
+    };
+
+    setCustomCompositionPresets((current) =>
+      [
+        preset,
+        ...current.filter((item) => item.id !== preset.id && item.name !== name)
+      ].slice(0, MAX_MJ_COMPOSITION_PRESETS)
+    );
+    setCompositionPresetId(preset.id);
+    setCompositionRecipeEnabled(true);
+    markCompositionManual();
+  }
+
+  function deleteSelectedCompositionPreset() {
+    if (!selectedCustomCompositionPreset) {
+      return;
+    }
+
+    setCustomCompositionPresets((current) =>
+      current.filter((item) => item.id !== selectedCustomCompositionPreset.id)
+    );
+    setCompositionPresetId("");
+    markCompositionManual();
+  }
+
+  function toggleLightingToken(
+    group: MjLightingTokenGroup,
+    tokenId: string
+  ) {
+    markLightingManual();
+    setLightingSelections((current) => {
+      const base = isAutoLightingActive
+        ? cloneLightingSelections(effectiveLightingSelections)
+        : current;
+      const selected = base[group.key];
+      const isSelected = selected.includes(tokenId);
+      const nextValues =
+        group.mode === "single"
+          ? isSelected
+            ? []
+            : [tokenId]
+          : isSelected
+            ? selected.filter((item) => item !== tokenId)
+            : [...selected, tokenId];
+
+      return {
+        ...base,
+        [group.key]: nextValues
+      };
+    });
+    setLightingPresetId("");
+  }
+
+  function markLightingManual() {
+    setLightingSource("manual");
+  }
+
+  function resetAutoLightingMatch() {
+    setAutoLightingEnabled(true);
+    setLightingSource("auto");
+  }
+
+  function handleLightingEnabledChange(checked: boolean) {
+    setLightingRecipeEnabled(checked);
+
+    if (!checked) {
+      setLightingSource("manual");
+    } else if (autoLightingEnabled && autoLightingPreset) {
+      setLightingSource("auto");
+    }
+  }
+
+  function handleAutoLightingEnabledChange(checked: boolean) {
+    setAutoLightingEnabled(checked);
+    setLightingSource(checked ? "auto" : "manual");
+  }
+
+  function applyLightingPreset(presetId: string) {
+    if (isAutoLightingActive) {
+      setLightingSelections(cloneLightingSelections(effectiveLightingSelections));
+      setLightingCustomText(effectiveLightingCustomText);
+      setLightingNegativePrompt(effectiveLightingNegativePrompt);
+    }
+
+    markLightingManual();
+    setLightingPresetId(presetId);
+
+    const preset = lightingPresets.find((item) => item.id === presetId);
+
+    if (!preset) {
+      return;
+    }
+
+    setLightingRecipeEnabled(true);
+    setLightingSelections(cloneLightingSelections(preset.selectedKeywords));
+    setLightingCustomText(preset.customText);
+    setLightingNegativePrompt(preset.negativePrompt);
+  }
+
+  function saveCurrentLightingPreset() {
+    if (!lightingPromptPreview.trim()) {
+      setError({
+        code: "missing_config",
+        title: "缺少光影配方",
+        message: "请先选择至少一个阴影关键词，或填写自定义光影短句。",
+        canRetry: false
+      });
+      return;
+    }
+
+    const fallbackName = effectiveLightingPreset?.builtIn
+      ? `${effectiveLightingPreset.name} 副本`
+      : effectiveLightingPreset?.name || "我的光影配方";
+    const name = window.prompt("光影预设名称", fallbackName)?.trim();
+
+    if (!name) {
+      return;
+    }
+
+    const previous = customLightingPresets.find((item) => item.name === name);
+    const preset: MjLightingPreset = {
+      id: previous?.id ?? createLightingPresetId(),
+      name,
+      createdAt: previous?.createdAt ?? new Date().toISOString(),
+      builtIn: false,
+      selectedKeywords: cloneLightingSelections(effectiveLightingSelections),
+      customText: effectiveLightingCustomText.trim(),
+      negativePrompt: effectiveLightingNegativePrompt.trim()
+    };
+
+    setCustomLightingPresets((current) =>
+      [
+        preset,
+        ...current.filter((item) => item.id !== preset.id && item.name !== name)
+      ].slice(0, MAX_MJ_LIGHTING_PRESETS)
+    );
+    setLightingPresetId(preset.id);
+    setLightingRecipeEnabled(true);
+    markLightingManual();
+  }
+
+  function deleteSelectedLightingPreset() {
+    if (!selectedCustomLightingPreset) {
+      return;
+    }
+
+    setCustomLightingPresets((current) =>
+      current.filter((item) => item.id !== selectedCustomLightingPreset.id)
+    );
+    setLightingPresetId("");
+    markLightingManual();
+  }
+
+  function toggleColorToken(group: MjColorTokenGroup, tokenId: string) {
+    markColorManual();
+    setColorSelections((current) => {
+      const base = isAutoColorActive
+        ? cloneColorSelections(effectiveColorSelections)
+        : current;
+      const selected = base[group.key];
+      const isSelected = selected.includes(tokenId);
+      const nextValues =
+        group.mode === "single"
+          ? isSelected
+            ? []
+            : [tokenId]
+          : isSelected
+            ? selected.filter((item) => item !== tokenId)
+            : [...selected, tokenId];
+
+      return {
+        ...base,
+        [group.key]: nextValues
+      };
+    });
+    setColorPresetId("");
+  }
+
+  function markColorManual() {
+    setColorSource("manual");
+  }
+
+  function resetAutoColorMatch() {
+    setAutoColorEnabled(true);
+    setColorSource("auto");
+  }
+
+  function handleColorEnabledChange(checked: boolean) {
+    setColorRecipeEnabled(checked);
+
+    if (!checked) {
+      setColorSource("manual");
+    } else if (autoColorEnabled && autoColorPreset) {
+      setColorSource("auto");
+    }
+  }
+
+  function handleAutoColorEnabledChange(checked: boolean) {
+    setAutoColorEnabled(checked);
+    setColorSource(checked ? "auto" : "manual");
+  }
+
+  function applyColorPreset(presetId: string) {
+    if (isAutoColorActive) {
+      setColorSelections(cloneColorSelections(effectiveColorSelections));
+      setColorCustomText(effectiveColorCustomText);
+      setColorNegativePrompt(effectiveColorNegativePrompt);
+    }
+
+    markColorManual();
+    setColorPresetId(presetId);
+
+    const preset = colorPresets.find((item) => item.id === presetId);
+
+    if (!preset) {
+      return;
+    }
+
+    setColorRecipeEnabled(true);
+    setColorSelections(cloneColorSelections(preset.selectedKeywords));
+    setColorCustomText(preset.customText);
+    setColorNegativePrompt(preset.negativePrompt);
+  }
+
+  function saveCurrentColorPreset() {
+    if (!colorPromptPreview.trim()) {
+      setError({
+        code: "missing_config",
+        title: "缺少配色配方",
+        message: "请先选择至少一个配色关键词，或填写自定义配色短句。",
+        canRetry: false
+      });
+      return;
+    }
+
+    const fallbackName = effectiveColorPreset?.builtIn
+      ? `${effectiveColorPreset.name} 副本`
+      : effectiveColorPreset?.name || "我的配色配方";
+    const name = window.prompt("配色预设名称", fallbackName)?.trim();
+
+    if (!name) {
+      return;
+    }
+
+    const previous = customColorPresets.find((item) => item.name === name);
+    const preset: MjColorPreset = {
+      id: previous?.id ?? createColorPresetId(),
+      name,
+      createdAt: previous?.createdAt ?? new Date().toISOString(),
+      builtIn: false,
+      selectedKeywords: cloneColorSelections(effectiveColorSelections),
+      customText: effectiveColorCustomText.trim(),
+      negativePrompt: effectiveColorNegativePrompt.trim()
+    };
+
+    setCustomColorPresets((current) =>
+      [
+        preset,
+        ...current.filter((item) => item.id !== preset.id && item.name !== name)
+      ].slice(0, MAX_MJ_COLOR_PRESETS)
+    );
+    setColorPresetId(preset.id);
+    setColorRecipeEnabled(true);
+    markColorManual();
+  }
+
+  function deleteSelectedColorPreset() {
+    if (!selectedCustomColorPreset) {
+      return;
+    }
+
+    setCustomColorPresets((current) =>
+      current.filter((item) => item.id !== selectedCustomColorPreset.id)
+    );
+    setColorPresetId("");
+    markColorManual();
+  }
+
   async function saveCurrentFavorite() {
     if (!result?.finalPrompt) {
       return;
@@ -743,9 +2101,15 @@ export function NanoBananaAssistant({
     }
 
     try {
-      setFavorites(
-        await onAddFavorite(name, item.input, item.result, item.referenceImages)
+      const nextFavorites = await onAddFavorite(
+        name,
+        item.input,
+        item.result,
+        item.referenceImages
       );
+
+      setFavorites(nextFavorites);
+      setLibraryTab("favorites");
     } catch (caught) {
       setError(toUserFacingError(caught));
     }
@@ -978,6 +2342,35 @@ export function NanoBananaAssistant({
     setPersonalizationCode(item.input.personalizationCode ?? "");
     setIdentityLock(item.input.identityLock);
     setExtraSpecs(item.input.extraSpecs ?? "");
+    setCompositionRecipeEnabled(
+      item.input.compositionRecipeEnabled ??
+        Boolean(item.input.compositionRecipe?.promptText)
+    );
+    setAutoCompositionEnabled(item.input.autoCompositionEnabled ?? true);
+    setCompositionSource(
+      item.input.compositionSource ??
+        (item.input.compositionRecipe?.promptText ? "manual" : "auto")
+    );
+    restoreCompositionRecipe(item.input.compositionRecipe);
+    setLightingRecipeEnabled(
+      item.input.lightingRecipeEnabled ??
+        Boolean(item.input.lightingRecipe?.promptText)
+    );
+    setAutoLightingEnabled(item.input.autoLightingEnabled ?? true);
+    setLightingSource(
+      item.input.lightingSource ??
+        (item.input.lightingRecipe?.promptText ? "manual" : "auto")
+    );
+    restoreLightingRecipe(item.input.lightingRecipe);
+    setColorRecipeEnabled(
+      item.input.colorRecipeEnabled ?? Boolean(item.input.colorRecipe?.promptText)
+    );
+    setAutoColorEnabled(item.input.autoColorEnabled ?? true);
+    setColorSource(
+      item.input.colorSource ??
+        (item.input.colorRecipe?.promptText ? "manual" : "auto")
+    );
+    restoreColorRecipe(item.input.colorRecipe);
     updateReverseContext(item.input.reverseContext);
     setResult(item.result);
     setError(null);
@@ -997,14 +2390,78 @@ export function NanoBananaAssistant({
     });
   }
 
+  function restoreCompositionRecipe(recipe: AssistantCompositionRecipe | undefined) {
+    setCompositionPresetId(recipe?.presetId ?? "");
+    setCompositionSelections(createCompositionSelectionsFromRecipe(recipe));
+    setCompositionCustomText(recipe?.customText ?? "");
+    setCompositionNegativePrompt(recipe?.negativePrompt ?? "");
+  }
+
+  function restoreLightingRecipe(recipe: AssistantLightingRecipe | undefined) {
+    setLightingPresetId(recipe?.presetId ?? "");
+    setLightingSelections(createLightingSelectionsFromRecipe(recipe));
+    setLightingCustomText(recipe?.customText ?? "");
+    setLightingNegativePrompt(recipe?.negativePrompt ?? "");
+  }
+
+  function restoreColorRecipe(recipe: AssistantColorRecipe | undefined) {
+    setColorPresetId(recipe?.presetId ?? "");
+    setColorSelections(createColorSelectionsFromRecipe(recipe));
+    setColorCustomText(recipe?.customText ?? "");
+    setColorNegativePrompt(recipe?.negativePrompt ?? "");
+  }
+
   return (
     <main className="assistant-view">
-      <section className="assistant-hero" aria-label="双引擎提示词助手">
-        <div>
+      <section
+        className="assistant-hero assistant-workbench-head"
+        aria-label="双引擎提示词助手"
+      >
+        <div className="assistant-hero-title">
           <span className="hero-kicker">
             {isMidjourney ? "MIDJOURNEY V8.1 提示词" : "NANO BANANA PRO 提示词"}
           </span>
           <h2>提示词助手</h2>
+        </div>
+        <div className="assistant-hero-controls">
+          <div
+            className="assistant-engine-grid assistant-hero-segmented"
+            role="tablist"
+            aria-label="提示词引擎"
+          >
+            {ASSISTANT_ENGINES.map((item) => (
+              <Tooltip content={item.hint} key={item.value}>
+                <button
+                  className={engine === item.value ? "active" : ""}
+                  type="button"
+                  role="tab"
+                  aria-selected={engine === item.value}
+                  onClick={() => setEngine(item.value)}
+                >
+                  {item.label}
+                </button>
+              </Tooltip>
+            ))}
+          </div>
+          <div
+            className="assistant-mode-grid assistant-hero-segmented"
+            role="tablist"
+            aria-label="任务类型"
+          >
+            {ASSISTANT_MODES.map((item) => (
+              <Tooltip content={item.hint} key={item.value}>
+                <button
+                  className={mode === item.value ? "active" : ""}
+                  type="button"
+                  role="tab"
+                  aria-selected={mode === item.value}
+                  onClick={() => setMode(item.value)}
+                >
+                  {item.label}
+                </button>
+              </Tooltip>
+            ))}
+          </div>
         </div>
         <div className="hero-metrics">
           <Tooltip content="当前已加入多图参考队列的图片数量">
@@ -1023,38 +2480,18 @@ export function NanoBananaAssistant({
 
       <div className="assistant-grid">
         <section className="panel-section assistant-panel">
-          <div className="section-header">
+          <div className="section-header assistant-composer-head">
             <div>
-              <h2>输入</h2>
+              <h2>编辑</h2>
               <p>
-                {isMidjourney
-                  ? "把中文创意整理成 Midjourney V8.1 可直接复制的英文 Prompt"
-                  : "把中文想法、参考图和限制条件整理成可直接复制的英文提示词"}
+                {currentEngine?.label ?? "Nano Banana Pro"} ·{" "}
+                {currentMode?.label ?? "自动判断"} · {displayAspectRatio}
               </p>
             </div>
             <Tooltip content={currentEngine?.hint ?? "选择目标模型后生成英文提示词"}>
               <WandSparkles size={18} />
             </Tooltip>
           </div>
-
-          <div className="assistant-engine-grid" role="tablist" aria-label="提示词引擎">
-            {ASSISTANT_ENGINES.map((item) => (
-              <Tooltip content={item.hint} key={item.value}>
-                <button
-                  className={engine === item.value ? "active" : ""}
-                  type="button"
-                  role="tab"
-                  aria-selected={engine === item.value}
-                  onClick={() => setEngine(item.value)}
-                >
-                  {item.label}
-                </button>
-              </Tooltip>
-            ))}
-          </div>
-          <p className="assistant-field-hint">
-            当前引擎：{currentEngine?.label ?? "Nano Banana Pro"}。{currentEngine?.hint}
-          </p>
 
           <details className="assistant-guide">
             <summary>使用说明</summary>
@@ -1116,25 +2553,6 @@ export function NanoBananaAssistant({
               </p>
             </section>
           )}
-
-          <div className="assistant-mode-grid" role="tablist" aria-label="任务类型">
-            {ASSISTANT_MODES.map((item) => (
-              <Tooltip content={item.hint} key={item.value}>
-                <button
-                  className={mode === item.value ? "active" : ""}
-                  type="button"
-                  role="tab"
-                  aria-selected={mode === item.value}
-                  onClick={() => setMode(item.value)}
-                >
-                  {item.label}
-                </button>
-              </Tooltip>
-            ))}
-          </div>
-          <p className="assistant-field-hint">
-            当前模式：{currentMode?.label ?? "自动判断"}。{currentMode?.hint}
-          </p>
 
           <label className="field-label">
             <span>想法</span>
@@ -1267,11 +2685,609 @@ export function NanoBananaAssistant({
           </Tooltip>
 
           {isMidjourney && (
-            <section className="assistant-mj-panel" aria-label="Midjourney V8.1 参数">
-              <div className="assistant-mj-header">
-                <strong>MJ V8.1 参数</strong>
-                <span>自动输出 --v 8.1，非法旧参数会被清理</span>
+            <details className="assistant-lighting-panel" aria-label="MJ 构图与镜头配方">
+              <summary className="assistant-mj-header">
+                <div>
+                  <strong>构图 / 镜头</strong>
+                  <span>
+                    {activeCompositionRecipe
+                      ? activeCompositionRecipe.name ?? "自定义构图"
+                      : "未启用构图配方"}
+                  </span>
+                </div>
+                <span className="assistant-mj-summary-meta">镜头关系搭配器</span>
+              </summary>
+
+              <Tooltip content="启用后，当前构图关键词组合会写进 MJ Prompt 正文；关闭时不会影响普通 MJ 提示词生成。">
+                <label className="identity-lock-toggle assistant-mj-toggle">
+                  <input
+                    type="checkbox"
+                    checked={compositionRecipeEnabled}
+                    onChange={(event) =>
+                      handleCompositionEnabledChange(event.target.checked)
+                    }
+                  />
+                  <span>启用构图配方</span>
+                </label>
+              </Tooltip>
+
+              <Tooltip content="根据想法、规格补充和反推 JSON 自动选择最接近的内置构图预设；只作为建议，不会自动写入 Prompt。">
+                <label className="identity-lock-toggle assistant-mj-toggle">
+                  <input
+                    type="checkbox"
+                    checked={autoCompositionEnabled}
+                    onChange={(event) =>
+                      handleAutoCompositionEnabledChange(event.target.checked)
+                    }
+                  />
+                  <span>自动匹配构图</span>
+                </label>
+              </Tooltip>
+
+              <div
+                className={
+                  compositionSource === "manual"
+                    ? "assistant-lighting-match is-manual"
+                    : isAutoCompositionActive
+                      ? "assistant-lighting-match is-auto"
+                      : "assistant-lighting-match"
+                }
+              >
+                <div>
+                  <strong>{createRecipeMatchTitle({
+                    autoEnabled: autoCompositionEnabled,
+                    isAutoActive: isAutoCompositionActive,
+                    source: compositionSource,
+                    presetName: autoCompositionPreset?.name,
+                    manualLabel: "手动构图，自动匹配暂停"
+                  })}</strong>
+                  <span>{createRecipeMatchDescription({
+                    autoEnabled: autoCompositionEnabled,
+                    isAutoActive: isAutoCompositionActive,
+                    source: compositionSource,
+                    match: autoCompositionMatch,
+                    enabledLabel: "打开后会根据想法、规格补充和反推 JSON 选择内置构图预设。",
+                    emptyLabel: "未匹配到明确构图，可手动选择预设或关键词。"
+                  })}</span>
+                </div>
+                {compositionSource === "manual" && (
+                  <button
+                    type="button"
+                    onClick={resetAutoCompositionMatch}
+                    disabled={!autoCompositionEnabled && !autoCompositionMatch}
+                  >
+                    重新自动匹配
+                  </button>
+                )}
               </div>
+
+              <div className="assistant-lighting-presets">
+                <label className="field-label">
+                  <span>构图预设</span>
+                  <select
+                    value={
+                      isAutoCompositionActive && autoCompositionPreset
+                        ? autoCompositionPreset.id
+                        : compositionPresetId
+                    }
+                    onChange={(event) => applyCompositionPreset(event.target.value)}
+                  >
+                    <option value="">自定义关键词组合</option>
+                    {compositionPresets.map((preset) => (
+                      <option value={preset.id} key={preset.id}>
+                        {preset.builtIn ? "内置 · " : "我的 · "}
+                        {preset.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button type="button" onClick={saveCurrentCompositionPreset}>
+                  <Save size={14} />
+                  <span>保存配方</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={deleteSelectedCompositionPreset}
+                  disabled={!selectedCustomCompositionPreset}
+                  aria-label="删除当前自定义构图预设"
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
+
+              <div className="assistant-lighting-groups">
+                {MJ_COMPOSITION_TOKEN_GROUPS.map((group) => (
+                  <section className="assistant-lighting-group" key={group.key}>
+                    <div className="assistant-lighting-group-head">
+                      <strong>{group.label}</strong>
+                      <span>{group.mode === "single" ? "单选" : "可多选"}</span>
+                    </div>
+                    <div className="assistant-lighting-chip-row">
+                      {group.options.map((option) => {
+                        const active = effectiveCompositionSelections[group.key].includes(
+                          option.id
+                        );
+
+                        return (
+                          <Tooltip content={option.text} key={option.id}>
+                            <button
+                              className={active ? "active" : ""}
+                              type="button"
+                              onClick={() => toggleCompositionToken(group, option.id)}
+                              aria-pressed={active}
+                            >
+                              {option.label}
+                            </button>
+                          </Tooltip>
+                        );
+                      })}
+                    </div>
+                  </section>
+                ))}
+              </div>
+
+              <label className="field-label">
+                <span>自定义英文短句</span>
+                <textarea
+                  value={
+                    isAutoCompositionActive
+                      ? effectiveCompositionCustomText
+                      : compositionCustomText
+                  }
+                  onChange={(event) => {
+                    if (isAutoCompositionActive) {
+                      setCompositionSelections(
+                        cloneCompositionSelections(effectiveCompositionSelections)
+                      );
+                      setCompositionNegativePrompt(effectiveCompositionNegativePrompt);
+                    }
+                    markCompositionManual();
+                    setCompositionCustomText(event.target.value);
+                    setCompositionPresetId("");
+                  }}
+                  rows={2}
+                  placeholder="例如：tiny warrior silhouette used as scale reference"
+                />
+              </label>
+
+              <label className="field-label">
+                <span>构图负面约束</span>
+                <textarea
+                  value={
+                    isAutoCompositionActive
+                      ? effectiveCompositionNegativePrompt
+                      : compositionNegativePrompt
+                  }
+                  onChange={(event) => {
+                    if (isAutoCompositionActive) {
+                      setCompositionSelections(
+                        cloneCompositionSelections(effectiveCompositionSelections)
+                      );
+                      setCompositionCustomText(effectiveCompositionCustomText);
+                    }
+                    markCompositionManual();
+                    setCompositionNegativePrompt(event.target.value);
+                    setCompositionPresetId("");
+                  }}
+                  rows={2}
+                  placeholder="例如：flat composition, cluttered background, centered subject"
+                />
+              </label>
+
+              <div className="assistant-lighting-preview">
+                <strong>英文预览</strong>
+                <span>
+                  {compositionPromptPreview ||
+                    "选择景别、机位、镜头、构图结构或艺术家构图逻辑后会生成英文构图片段。"}
+                </span>
+              </div>
+            </details>
+          )}
+
+          {isMidjourney && (
+            <details className="assistant-lighting-panel" aria-label="MJ 光影与阴影配方">
+              <summary className="assistant-mj-header">
+                <div>
+                  <strong>光影 / 阴影</strong>
+                  <span>
+                    {activeLightingRecipe
+                      ? activeLightingRecipe.name ?? "自定义光影"
+                      : "未启用光影配方"}
+                  </span>
+                </div>
+                <span className="assistant-mj-summary-meta">关键词搭配器</span>
+              </summary>
+
+              <Tooltip content="启用后，当前阴影关键词组合会写进 MJ Prompt 正文；关闭时不会影响生成。">
+                <label className="identity-lock-toggle assistant-mj-toggle">
+                  <input
+                    type="checkbox"
+                    checked={lightingRecipeEnabled}
+                    onChange={(event) =>
+                      handleLightingEnabledChange(event.target.checked)
+                    }
+                  />
+                  <span>启用光影配方</span>
+                </label>
+              </Tooltip>
+
+              <Tooltip content="根据想法、规格补充和反推 JSON 自动选择最接近的内置光影预设；手动编辑后会暂停自动覆盖。">
+                <label className="identity-lock-toggle assistant-mj-toggle">
+                  <input
+                    type="checkbox"
+                    checked={autoLightingEnabled}
+                    onChange={(event) =>
+                      handleAutoLightingEnabledChange(event.target.checked)
+                    }
+                  />
+                  <span>自动匹配光影</span>
+                </label>
+              </Tooltip>
+
+              <div
+                className={
+                  lightingSource === "manual"
+                    ? "assistant-lighting-match is-manual"
+                    : isAutoLightingActive
+                      ? "assistant-lighting-match is-auto"
+                      : "assistant-lighting-match"
+                }
+              >
+                <div>
+                  <strong>{createLightingMatchTitle({
+                    autoLightingEnabled,
+                    isAutoLightingActive,
+                    lightingSource,
+                    presetName: autoLightingPreset?.name
+                  })}</strong>
+                  <span>{createLightingMatchDescription({
+                    autoLightingEnabled,
+                    isAutoLightingActive,
+                    lightingSource,
+                    match: autoLightingMatch
+                  })}</span>
+                </div>
+                {lightingSource === "manual" && (
+                  <button
+                    type="button"
+                    onClick={resetAutoLightingMatch}
+                    disabled={!autoLightingEnabled && !autoLightingMatch}
+                  >
+                    重新自动匹配
+                  </button>
+                )}
+              </div>
+
+              <div className="assistant-lighting-presets">
+                <label className="field-label">
+                  <span>场景预设</span>
+                  <select
+                    value={
+                      isAutoLightingActive && autoLightingPreset
+                        ? autoLightingPreset.id
+                        : lightingPresetId
+                    }
+                    onChange={(event) => applyLightingPreset(event.target.value)}
+                  >
+                    <option value="">自定义关键词组合</option>
+                    {lightingPresets.map((preset) => (
+                      <option value={preset.id} key={preset.id}>
+                        {preset.builtIn ? "内置 · " : "我的 · "}
+                        {preset.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button type="button" onClick={saveCurrentLightingPreset}>
+                  <Save size={14} />
+                  <span>保存配方</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={deleteSelectedLightingPreset}
+                  disabled={!selectedCustomLightingPreset}
+                  aria-label="删除当前自定义光影预设"
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
+
+              <div className="assistant-lighting-groups">
+                {MJ_LIGHTING_TOKEN_GROUPS.map((group) => (
+                  <section className="assistant-lighting-group" key={group.key}>
+                    <div className="assistant-lighting-group-head">
+                      <strong>{group.label}</strong>
+                      <span>{group.mode === "single" ? "单选" : "可多选"}</span>
+                    </div>
+                    <div className="assistant-lighting-chip-row">
+                      {group.options.map((option) => {
+                        const active = effectiveLightingSelections[group.key].includes(
+                          option.id
+                        );
+
+                        return (
+                          <Tooltip content={option.text} key={option.id}>
+                            <button
+                              className={active ? "active" : ""}
+                              type="button"
+                              onClick={() => toggleLightingToken(group, option.id)}
+                              aria-pressed={active}
+                            >
+                              {option.label}
+                            </button>
+                          </Tooltip>
+                        );
+                      })}
+                    </div>
+                  </section>
+                ))}
+              </div>
+
+              <label className="field-label">
+                <span>自定义英文短句</span>
+                <textarea
+                  value={
+                    isAutoLightingActive
+                      ? effectiveLightingCustomText
+                      : lightingCustomText
+                  }
+                  onChange={(event) => {
+                    if (isAutoLightingActive) {
+                      setLightingSelections(
+                        cloneLightingSelections(effectiveLightingSelections)
+                      );
+                      setLightingNegativePrompt(effectiveLightingNegativePrompt);
+                    }
+                    markLightingManual();
+                    setLightingCustomText(event.target.value);
+                    setLightingPresetId("");
+                  }}
+                  rows={2}
+                  placeholder="例如：deep shadow pockets under the black tiled eaves"
+                />
+              </label>
+
+              <label className="field-label">
+                <span>光影负面约束</span>
+                <textarea
+                  value={
+                    isAutoLightingActive
+                      ? effectiveLightingNegativePrompt
+                      : lightingNegativePrompt
+                  }
+                  onChange={(event) => {
+                    if (isAutoLightingActive) {
+                      setLightingSelections(
+                        cloneLightingSelections(effectiveLightingSelections)
+                      );
+                      setLightingCustomText(effectiveLightingCustomText);
+                    }
+                    markLightingManual();
+                    setLightingNegativePrompt(event.target.value);
+                    setLightingPresetId("");
+                  }}
+                  rows={2}
+                  placeholder="例如：flat lighting, overexposed face, muddy shadows"
+                />
+              </label>
+
+              <div className="assistant-lighting-preview">
+                <strong>英文预览</strong>
+                <span>
+                  {lightingPromptPreview ||
+                    "选择阴影形状、落点、边缘或补光后会生成英文光影片段。"}
+                </span>
+              </div>
+            </details>
+          )}
+
+          {isMidjourney && (
+            <details className="assistant-lighting-panel" aria-label="MJ 配色与影调配方">
+              <summary className="assistant-mj-header">
+                <div>
+                  <strong>配色 / 影调</strong>
+                  <span>
+                    {activeColorRecipe
+                      ? activeColorRecipe.name ?? "自定义配色"
+                      : "未启用配色配方"}
+                  </span>
+                </div>
+                <span className="assistant-mj-summary-meta">色彩关系搭配器</span>
+              </summary>
+
+              <Tooltip content="启用后，当前配色关键词组合会写进 MJ Prompt 正文；关闭时不会影响普通 MJ 提示词生成。">
+                <label className="identity-lock-toggle assistant-mj-toggle">
+                  <input
+                    type="checkbox"
+                    checked={colorRecipeEnabled}
+                    onChange={(event) =>
+                      handleColorEnabledChange(event.target.checked)
+                    }
+                  />
+                  <span>启用配色配方</span>
+                </label>
+              </Tooltip>
+
+              <Tooltip content="根据想法、规格补充和反推 JSON 自动选择最接近的内置配色预设；只作为建议，不会自动写入 Prompt。">
+                <label className="identity-lock-toggle assistant-mj-toggle">
+                  <input
+                    type="checkbox"
+                    checked={autoColorEnabled}
+                    onChange={(event) =>
+                      handleAutoColorEnabledChange(event.target.checked)
+                    }
+                  />
+                  <span>自动匹配配色</span>
+                </label>
+              </Tooltip>
+
+              <div
+                className={
+                  colorSource === "manual"
+                    ? "assistant-lighting-match is-manual"
+                    : isAutoColorActive
+                      ? "assistant-lighting-match is-auto"
+                      : "assistant-lighting-match"
+                }
+              >
+                <div>
+                  <strong>{createRecipeMatchTitle({
+                    autoEnabled: autoColorEnabled,
+                    isAutoActive: isAutoColorActive,
+                    source: colorSource,
+                    presetName: autoColorPreset?.name,
+                    manualLabel: "手动配色，自动匹配暂停"
+                  })}</strong>
+                  <span>{createRecipeMatchDescription({
+                    autoEnabled: autoColorEnabled,
+                    isAutoActive: isAutoColorActive,
+                    source: colorSource,
+                    match: autoColorMatch,
+                    enabledLabel: "打开后会根据想法、规格补充和反推 JSON 选择内置配色预设。",
+                    emptyLabel: "未匹配到明确配色，可手动选择预设或关键词。"
+                  })}</span>
+                </div>
+                {colorSource === "manual" && (
+                  <button
+                    type="button"
+                    onClick={resetAutoColorMatch}
+                    disabled={!autoColorEnabled && !autoColorMatch}
+                  >
+                    重新自动匹配
+                  </button>
+                )}
+              </div>
+
+              <div className="assistant-lighting-presets">
+                <label className="field-label">
+                  <span>配色预设</span>
+                  <select
+                    value={
+                      isAutoColorActive && autoColorPreset
+                        ? autoColorPreset.id
+                        : colorPresetId
+                    }
+                    onChange={(event) => applyColorPreset(event.target.value)}
+                  >
+                    <option value="">自定义关键词组合</option>
+                    {colorPresets.map((preset) => (
+                      <option value={preset.id} key={preset.id}>
+                        {preset.builtIn ? "内置 · " : "我的 · "}
+                        {preset.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button type="button" onClick={saveCurrentColorPreset}>
+                  <Save size={14} />
+                  <span>保存配方</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={deleteSelectedColorPreset}
+                  disabled={!selectedCustomColorPreset}
+                  aria-label="删除当前自定义配色预设"
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
+
+              <div className="assistant-lighting-groups">
+                {MJ_COLOR_TOKEN_GROUPS.map((group) => (
+                  <section className="assistant-lighting-group" key={group.key}>
+                    <div className="assistant-lighting-group-head">
+                      <strong>{group.label}</strong>
+                      <span>{group.mode === "single" ? "单选" : "可多选"}</span>
+                    </div>
+                    <div className="assistant-lighting-chip-row">
+                      {group.options.map((option) => {
+                        const active = effectiveColorSelections[group.key].includes(
+                          option.id
+                        );
+
+                        return (
+                          <Tooltip content={option.text} key={option.id}>
+                            <button
+                              className={active ? "active" : ""}
+                              type="button"
+                              onClick={() => toggleColorToken(group, option.id)}
+                              aria-pressed={active}
+                            >
+                              {option.label}
+                            </button>
+                          </Tooltip>
+                        );
+                      })}
+                    </div>
+                  </section>
+                ))}
+              </div>
+
+              <label className="field-label">
+                <span>自定义英文短句</span>
+                <textarea
+                  value={
+                    isAutoColorActive
+                      ? effectiveColorCustomText
+                      : colorCustomText
+                  }
+                  onChange={(event) => {
+                    if (isAutoColorActive) {
+                      setColorSelections(cloneColorSelections(effectiveColorSelections));
+                      setColorNegativePrompt(effectiveColorNegativePrompt);
+                    }
+                    markColorManual();
+                    setColorCustomText(event.target.value);
+                    setColorPresetId("");
+                  }}
+                  rows={2}
+                  placeholder="例如：moon-white highlights on mist and wet stone"
+                />
+              </label>
+
+              <label className="field-label">
+                <span>配色负面约束</span>
+                <textarea
+                  value={
+                    isAutoColorActive
+                      ? effectiveColorNegativePrompt
+                      : colorNegativePrompt
+                  }
+                  onChange={(event) => {
+                    if (isAutoColorActive) {
+                      setColorSelections(cloneColorSelections(effectiveColorSelections));
+                      setColorCustomText(effectiveColorCustomText);
+                    }
+                    markColorManual();
+                    setColorNegativePrompt(event.target.value);
+                    setColorPresetId("");
+                  }}
+                  rows={2}
+                  placeholder="例如：neon, overly saturated colors, plastic-looking materials"
+                />
+              </label>
+
+              <div className="assistant-lighting-preview">
+                <strong>英文预览</strong>
+                <span>
+                  {colorPromptPreview ||
+                    "选择主色调、阴影色、高光色、点缀色或电影调色后会生成英文配色片段。"}
+                </span>
+              </div>
+            </details>
+          )}
+
+          {isMidjourney && (
+            <details className="assistant-mj-panel" aria-label="Midjourney V8.1 参数">
+              <summary className="assistant-mj-header">
+                <div>
+                  <strong>MJ V8.1 参数</strong>
+                  <span>
+                    {renderQuality.toUpperCase()} · {rawEnabled ? "Raw" : "Default"} · S{stylize} · C{chaos} · W{weird}
+                  </span>
+                </div>
+                <span className="assistant-mj-summary-meta">预设与高级参数</span>
+              </summary>
 
               <div className="assistant-mj-help">
                 <span><strong>Stylize</strong> 0-1000：80 偏写实控制，120 通用默认，150-250 更有风格化。</span>
@@ -1390,7 +3406,7 @@ export function NanoBananaAssistant({
                   placeholder="例如：text, logo, watermark, UI, modern buildings"
                 />
               </label>
-            </section>
+            </details>
           )}
 
           <label className="field-label">
@@ -1693,89 +3709,127 @@ export function NanoBananaAssistant({
         </section>
       </div>
 
-      <section className="panel-section assistant-history-panel assistant-favorites-panel">
-        <div className="section-header">
+      <section className="panel-section assistant-history-panel assistant-library-panel">
+        <div className="section-header assistant-library-header">
           <div>
-            <h2>收藏提示词</h2>
-            <p>最多 100 条，可恢复后继续编辑</p>
+            <h2>提示词库</h2>
+            <p>
+              {libraryTab === "favorites"
+                ? `收藏 ${favorites.length} 条，可恢复后继续编辑`
+                : `最近 ${history.length} 条，生成后自动记录`}
+            </p>
           </div>
-          <div className="button-row compact">
-            <Tooltip content="刷新收藏提示词">
-              <button type="button" onClick={refreshFavorites}>
-                <RefreshCw size={16} />
-              </button>
-            </Tooltip>
-            <Tooltip content="清空收藏提示词">
+          <div className="assistant-library-toolbar">
+            <div
+              className="assistant-library-tabs"
+              role="tablist"
+              aria-label="提示词库类型"
+            >
               <button
+                className={libraryTab === "favorites" ? "active" : ""}
                 type="button"
-                onClick={clearFavorites}
-                disabled={!favorites.length}
+                role="tab"
+                aria-selected={libraryTab === "favorites"}
+                onClick={() => setLibraryTab("favorites")}
               >
-                <Trash2 size={16} />
+                <Star size={14} />
+                <span>收藏</span>
+                <strong>{favorites.length}</strong>
               </button>
-            </Tooltip>
+              <button
+                className={libraryTab === "history" ? "active" : ""}
+                type="button"
+                role="tab"
+                aria-selected={libraryTab === "history"}
+                onClick={() => setLibraryTab("history")}
+              >
+                <RefreshCw size={14} />
+                <span>最近</span>
+                <strong>{history.length}</strong>
+              </button>
+            </div>
+            <div className="button-row compact">
+              <Tooltip
+                content={
+                  libraryTab === "favorites"
+                    ? "刷新收藏提示词"
+                    : "刷新助手历史"
+                }
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (libraryTab === "favorites") {
+                      void refreshFavorites();
+                    } else {
+                      void refreshHistory();
+                    }
+                  }}
+                >
+                  <RefreshCw size={16} />
+                </button>
+              </Tooltip>
+              <Tooltip
+                content={
+                  libraryTab === "favorites"
+                    ? "清空收藏提示词"
+                    : "清空助手历史"
+                }
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (libraryTab === "favorites") {
+                      void clearFavorites();
+                    } else {
+                      void clearHistory();
+                    }
+                  }}
+                  disabled={
+                    libraryTab === "favorites" ? !favorites.length : !history.length
+                  }
+                >
+                  <Trash2 size={16} />
+                </button>
+              </Tooltip>
+            </div>
           </div>
         </div>
 
-        {favorites.length ? (
-          <div className="assistant-history-list">
-            {favorites.map((item) => (
-              <article
-                className="assistant-history-item assistant-favorite-item"
-                key={item.id}
-              >
-                <Tooltip content="恢复这条收藏并继续编辑">
-                  <button
-                    type="button"
-                    onClick={() => void restoreAssistantItem(item)}
-                  >
-                    <strong>{item.name}</strong>
-                    <span>{item.summarySubtitle}</span>
-                    <time>{formatDate(item.updatedAt)}</time>
-                  </button>
-                </Tooltip>
-                <Tooltip content="删除这条收藏">
-                  <button
-                    className="icon-danger"
-                    type="button"
-                    onClick={() => removeFavorite(item.id)}
-                  >
-                    <Trash2 size={15} />
-                  </button>
-                </Tooltip>
-              </article>
-            ))}
-          </div>
-        ) : (
-          <div className="empty-state">暂无收藏提示词</div>
-        )}
-      </section>
-
-      <section className="panel-section assistant-history-panel">
-        <div className="section-header">
-          <div>
-            <h2>助手历史</h2>
-            <p>最近 20 条</p>
-          </div>
-          <div className="button-row compact">
-            <Tooltip content="刷新助手历史">
-              <button type="button" onClick={refreshHistory}>
-                <RefreshCw size={16} />
-              </button>
-            </Tooltip>
-            <Tooltip content="清空助手历史">
-              <button
-                type="button"
-                onClick={clearHistory}
-                disabled={!history.length}
-              >
-                <Trash2 size={16} />
-              </button>
-            </Tooltip>
-          </div>
-        </div>
-
-        {history.length ? (
+        {libraryTab === "favorites" ? (
+          favorites.length ? (
+            <div className="assistant-history-list">
+              {favorites.map((item) => (
+                <article
+                  className="assistant-history-item assistant-favorite-item"
+                  key={item.id}
+                >
+                  <Tooltip content="恢复这条收藏并继续编辑">
+                    <button
+                      type="button"
+                      onClick={() => void restoreAssistantItem(item)}
+                    >
+                      <strong>{item.name}</strong>
+                      <span>{item.summarySubtitle}</span>
+                      <time>{formatDate(item.updatedAt)}</time>
+                    </button>
+                  </Tooltip>
+                  <Tooltip content="删除这条收藏">
+                    <button
+                      className="icon-danger"
+                      type="button"
+                      onClick={() => removeFavorite(item.id)}
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  </Tooltip>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className="empty-state">暂无收藏提示词</div>
+          )
+        ) : history.length ? (
           <div className="assistant-history-list">
             {history.map((item) => (
               <article className="assistant-history-item" key={item.id}>
@@ -2136,6 +4190,753 @@ function truncateReverseContextText(value: string, limit: number): string {
   return `${normalized.slice(0, limit)}...`;
 }
 
+function matchMjPreset(
+  input: MjRecipeMatchInput,
+  rules: Array<{ presetId: string; keywords: string[] }>
+): MjRecipeMatch | undefined {
+  const searchableText = createRecipeMatchSearchText(input);
+
+  if (!searchableText) {
+    return undefined;
+  }
+
+  const matches = rules.map((rule, ruleIndex) => {
+    const matchedKeywords = rule.keywords.filter((keyword) =>
+      searchableText.includes(keyword.toLowerCase())
+    );
+
+    return {
+      presetId: rule.presetId,
+      matchedKeywords: [...new Set(matchedKeywords)],
+      score: matchedKeywords.length,
+      ruleIndex
+    };
+  })
+    .filter((match) => match.score > 0)
+    .sort((left, right) =>
+      right.score === left.score
+        ? left.ruleIndex - right.ruleIndex
+        : right.score - left.score
+    );
+
+  const best = matches[0];
+
+  if (!best) {
+    return undefined;
+  }
+
+  return {
+    presetId: best.presetId,
+    matchedKeywords: best.matchedKeywords,
+    confidence: Math.min(0.95, 0.56 + best.score * 0.12),
+    reason: `命中关键词：${best.matchedKeywords.join("、")}`
+  };
+}
+
+function createRecipeMatchSearchText(input: MjRecipeMatchInput): string {
+  const fields = input.reverseContext?.fields;
+  return [
+    input.idea,
+    input.extraSpecs,
+    fields?.subject,
+    fields?.style,
+    fields?.lighting,
+    fields?.color,
+    fields?.composition,
+    fields?.camera,
+    fields?.mood,
+    input.reverseContext?.promptText
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function createRecipeMatchTitle({
+  autoEnabled,
+  isAutoActive,
+  source,
+  presetName,
+  manualLabel
+}: {
+  autoEnabled: boolean;
+  isAutoActive: boolean;
+  source: AssistantRecipeSource;
+  presetName?: string;
+  manualLabel: string;
+}): string {
+  if (source === "manual") {
+    return manualLabel;
+  }
+
+  if (!autoEnabled) {
+    return "自动匹配已关闭";
+  }
+
+  if (isAutoActive && presetName) {
+    return `已自动匹配：${presetName}`;
+  }
+
+  return "未匹配到明确场景";
+}
+
+function createRecipeMatchDescription({
+  autoEnabled,
+  isAutoActive,
+  source,
+  match,
+  enabledLabel,
+  emptyLabel
+}: {
+  autoEnabled: boolean;
+  isAutoActive: boolean;
+  source: AssistantRecipeSource;
+  match?: MjRecipeMatch;
+  enabledLabel: string;
+  emptyLabel: string;
+}): string {
+  if (source === "manual") {
+    return "继续修改想法不会覆盖当前 chip 组合。";
+  }
+
+  if (!autoEnabled) {
+    return enabledLabel;
+  }
+
+  if (isAutoActive && match) {
+    return `${match.reason}，置信度 ${Math.round(match.confidence * 100)}%。`;
+  }
+
+  return emptyLabel;
+}
+
+function matchMjLightingPreset(
+  input: MjLightingMatchInput
+): MjLightingMatch | undefined {
+  const searchableText = createLightingMatchSearchText(input);
+
+  if (!searchableText) {
+    return undefined;
+  }
+
+  const matches = MJ_LIGHTING_MATCH_RULES.map((rule, ruleIndex) => {
+    const matchedKeywords = rule.keywords.filter((keyword) =>
+      searchableText.includes(keyword.toLowerCase())
+    );
+
+    return {
+      presetId: rule.presetId,
+      matchedKeywords: [...new Set(matchedKeywords)],
+      score: matchedKeywords.length,
+      ruleIndex
+    };
+  })
+    .filter((match) => match.score > 0)
+    .sort((left, right) =>
+      right.score === left.score
+        ? left.ruleIndex - right.ruleIndex
+        : right.score - left.score
+    );
+
+  const best = matches[0];
+
+  if (!best) {
+    return undefined;
+  }
+
+  return {
+    presetId: best.presetId,
+    matchedKeywords: best.matchedKeywords,
+    confidence: Math.min(0.95, 0.56 + best.score * 0.12),
+    reason: `命中关键词：${best.matchedKeywords.join("、")}`
+  };
+}
+
+function createLightingMatchSearchText(input: MjLightingMatchInput): string {
+  const fields = input.reverseContext?.fields;
+  return [
+    input.idea,
+    input.extraSpecs,
+    fields?.subject,
+    fields?.style,
+    fields?.lighting,
+    fields?.composition,
+    fields?.mood,
+    input.reverseContext?.promptText
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function createLightingMatchTitle({
+  autoLightingEnabled,
+  isAutoLightingActive,
+  lightingSource,
+  presetName
+}: {
+  autoLightingEnabled: boolean;
+  isAutoLightingActive: boolean;
+  lightingSource: AssistantRecipeSource;
+  presetName?: string;
+}): string {
+  if (lightingSource === "manual") {
+    return "手动光影，自动匹配暂停";
+  }
+
+  if (!autoLightingEnabled) {
+    return "自动匹配已关闭";
+  }
+
+  if (isAutoLightingActive && presetName) {
+    return `已自动匹配：${presetName}`;
+  }
+
+  return "未匹配到明确场景";
+}
+
+function createLightingMatchDescription({
+  autoLightingEnabled,
+  isAutoLightingActive,
+  lightingSource,
+  match
+}: {
+  autoLightingEnabled: boolean;
+  isAutoLightingActive: boolean;
+  lightingSource: AssistantRecipeSource;
+  match?: MjLightingMatch;
+}): string {
+  if (lightingSource === "manual") {
+    return "继续修改想法不会覆盖当前 chip 组合。";
+  }
+
+  if (!autoLightingEnabled) {
+    return "打开后会根据想法、规格补充和反推 JSON 选择内置光影预设。";
+  }
+
+  if (isAutoLightingActive && match) {
+    return `${match.reason}，置信度 ${Math.round(match.confidence * 100)}%。`;
+  }
+
+  return "未匹配到明确场景，可手动选择预设或关键词。";
+}
+
+function createBuiltInCompositionPreset(
+  id: string,
+  name: string,
+  selectedKeywords: Partial<MjCompositionSelections>,
+  customText = "",
+  negativePrompt = ""
+): MjCompositionPreset {
+  return {
+    id,
+    name,
+    createdAt: "builtin",
+    builtIn: true,
+    selectedKeywords: {
+      ...createEmptyCompositionSelections(),
+      ...Object.fromEntries(
+        COMPOSITION_RECIPE_KEYS.map((key) => [
+          key,
+          selectedKeywords[key]?.filter((item) =>
+            hasCompositionToken(key, item)
+          ) ?? []
+        ])
+      ) as MjCompositionSelections
+    },
+    customText,
+    negativePrompt
+  };
+}
+
+function createEmptyCompositionSelections(): MjCompositionSelections {
+  return {
+    shotSize: [],
+    cameraAngle: [],
+    lens: [],
+    structure: [],
+    focalHierarchy: [],
+    artistLogic: []
+  };
+}
+
+function cloneCompositionSelections(
+  selections: Partial<MjCompositionSelections> | undefined
+): MjCompositionSelections {
+  const next = createEmptyCompositionSelections();
+
+  COMPOSITION_RECIPE_KEYS.forEach((key) => {
+    next[key] = (selections?.[key] ?? []).filter((item) =>
+      hasCompositionToken(key, item)
+    );
+  });
+
+  return next;
+}
+
+function createCompositionSelectionsFromRecipe(
+  recipe: AssistantCompositionRecipe | undefined
+): MjCompositionSelections {
+  return readStoredCompositionSelections(recipe?.selectedKeywords);
+}
+
+function createCompositionRecipeKeywords(
+  selections: MjCompositionSelections
+): AssistantCompositionRecipe["selectedKeywords"] {
+  const entries = COMPOSITION_RECIPE_KEYS.map((key) => {
+    const values = selections[key];
+
+    return values.length ? [key, values] : undefined;
+  }).filter((entry): entry is [AssistantCompositionRecipeKey, string[]] =>
+    Boolean(entry)
+  );
+
+  return entries.length
+    ? Object.fromEntries(entries) as AssistantCompositionRecipe["selectedKeywords"]
+    : undefined;
+}
+
+function buildMjCompositionPrompt(
+  selections: MjCompositionSelections,
+  customText: string
+): string {
+  const shotSize = getCompositionTokenText("shotSize", selections.shotSize[0]);
+  const cameraAngle = getCompositionTokenText(
+    "cameraAngle",
+    selections.cameraAngle[0]
+  );
+  const lens = getCompositionTokenText("lens", selections.lens[0]);
+  const structures = selections.structure
+    .map((id) => getCompositionTokenText("structure", id))
+    .filter(Boolean);
+  const focalHierarchy = selections.focalHierarchy
+    .map((id) => getCompositionTokenText("focalHierarchy", id))
+    .filter(Boolean);
+  const artistLogic = selections.artistLogic
+    .map((id) => getCompositionTokenText("artistLogic", id))
+    .filter(Boolean);
+  const customClauses = customText
+    .split(/\n/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  return [
+    shotSize,
+    cameraAngle,
+    lens,
+    ...structures,
+    ...focalHierarchy,
+    ...artistLogic,
+    ...customClauses
+  ]
+    .filter(Boolean)
+    .join(", ");
+}
+
+function readStoredCompositionSelections(value: unknown): MjCompositionSelections {
+  if (!isRecord(value)) {
+    return createEmptyCompositionSelections();
+  }
+
+  const selections = createEmptyCompositionSelections();
+
+  COMPOSITION_RECIPE_KEYS.forEach((key) => {
+    selections[key] = readStringArray(value[key]).filter((item) =>
+      hasCompositionToken(key, item)
+    );
+  });
+
+  return selections;
+}
+
+function readStoredCompositionKeywords(
+  value: unknown
+): AssistantCompositionRecipe["selectedKeywords"] {
+  const selections = readStoredCompositionSelections(value);
+  return createCompositionRecipeKeywords(selections);
+}
+
+function getCompositionTokenText(
+  key: AssistantCompositionRecipeKey,
+  tokenId: string | undefined
+): string {
+  if (!tokenId) {
+    return "";
+  }
+
+  return getCompositionToken(key, tokenId)?.text ?? "";
+}
+
+function hasCompositionToken(
+  key: AssistantCompositionRecipeKey,
+  tokenId: string
+): boolean {
+  return Boolean(getCompositionToken(key, tokenId));
+}
+
+function getCompositionToken(
+  key: AssistantCompositionRecipeKey,
+  tokenId: string
+): MjRecipeToken | undefined {
+  return MJ_COMPOSITION_TOKEN_GROUPS.find(
+    (group) => group.key === key
+  )?.options.find((option) => option.id === tokenId);
+}
+
+function createBuiltInLightingPreset(
+  id: string,
+  name: string,
+  selectedKeywords: Partial<MjLightingSelections>,
+  customText = "",
+  negativePrompt = ""
+): MjLightingPreset {
+  return {
+    id,
+    name,
+    createdAt: "builtin",
+    builtIn: true,
+    selectedKeywords: {
+      ...createEmptyLightingSelections(),
+      ...Object.fromEntries(
+        LIGHTING_RECIPE_KEYS.map((key) => [
+          key,
+          selectedKeywords[key]?.filter((item) =>
+            hasLightingToken(key, item)
+          ) ?? []
+        ])
+      ) as MjLightingSelections
+    },
+    customText,
+    negativePrompt
+  };
+}
+
+function createEmptyLightingSelections(): MjLightingSelections {
+  return {
+    shadowShapes: [],
+    shadowTargets: [],
+    shadowEdges: [],
+    contrast: [],
+    shadowSources: [],
+    fillLights: []
+  };
+}
+
+function cloneLightingSelections(
+  selections: Partial<MjLightingSelections> | undefined
+): MjLightingSelections {
+  const next = createEmptyLightingSelections();
+
+  LIGHTING_RECIPE_KEYS.forEach((key) => {
+    next[key] = (selections?.[key] ?? []).filter((item) =>
+      hasLightingToken(key, item)
+    );
+  });
+
+  return next;
+}
+
+function createLightingSelectionsFromRecipe(
+  recipe: AssistantLightingRecipe | undefined
+): MjLightingSelections {
+  return readStoredLightingSelections(recipe?.selectedKeywords);
+}
+
+function createLightingRecipeKeywords(
+  selections: MjLightingSelections
+): AssistantLightingRecipe["selectedKeywords"] {
+  const entries = LIGHTING_RECIPE_KEYS.map((key) => {
+    const values = selections[key];
+
+    return values.length ? [key, values] : undefined;
+  }).filter((entry): entry is [AssistantLightingRecipeKey, string[]] =>
+    Boolean(entry)
+  );
+
+  return entries.length
+    ? Object.fromEntries(entries) as AssistantLightingRecipe["selectedKeywords"]
+    : undefined;
+}
+
+function buildMjLightingPrompt(
+  selections: MjLightingSelections,
+  customText: string
+): string {
+  const edge = getLightingTokenText("shadowEdges", selections.shadowEdges[0]);
+  const shapes = selections.shadowShapes
+    .map((id) => getLightingTokenText("shadowShapes", id))
+    .filter(Boolean);
+  const targets = selections.shadowTargets
+    .map((id) => getLightingTokenText("shadowTargets", id))
+    .filter(Boolean);
+  const sources = selections.shadowSources
+    .map((id) => getLightingTokenText("shadowSources", id))
+    .filter(Boolean);
+  const contrast = selections.contrast
+    .map((id) => getLightingTokenText("contrast", id))
+    .filter(Boolean);
+  const fillLights = selections.fillLights
+    .map((id) => getLightingTokenText("fillLights", id))
+    .filter(Boolean);
+  const clauses = shapes.map((shape, index) => {
+    const source = sources[index % Math.max(sources.length, 1)];
+    const target = targets[index % Math.max(targets.length, 1)];
+
+    return [
+      edge,
+      shape,
+      source,
+      target
+    ]
+      .filter(Boolean)
+      .join(" ");
+  });
+  const customClauses = customText
+    .split(/\n/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  return [
+    ...clauses,
+    ...contrast,
+    ...fillLights,
+    ...customClauses
+  ].join(", ");
+}
+
+function readStoredLightingSelections(value: unknown): MjLightingSelections {
+  if (!isRecord(value)) {
+    return createEmptyLightingSelections();
+  }
+
+  const selections = createEmptyLightingSelections();
+
+  LIGHTING_RECIPE_KEYS.forEach((key) => {
+    selections[key] = readStringArray(value[key]).filter((item) =>
+      hasLightingToken(key, item)
+    );
+  });
+
+  return selections;
+}
+
+function readStoredLightingKeywords(
+  value: unknown
+): AssistantLightingRecipe["selectedKeywords"] {
+  const selections = readStoredLightingSelections(value);
+  return createLightingRecipeKeywords(selections);
+}
+
+function getLightingTokenText(
+  key: AssistantLightingRecipeKey,
+  tokenId: string | undefined
+): string {
+  if (!tokenId) {
+    return "";
+  }
+
+  return getLightingToken(key, tokenId)?.text ?? "";
+}
+
+function hasLightingToken(
+  key: AssistantLightingRecipeKey,
+  tokenId: string
+): boolean {
+  return Boolean(getLightingToken(key, tokenId));
+}
+
+function getLightingToken(
+  key: AssistantLightingRecipeKey,
+  tokenId: string
+): MjRecipeToken | undefined {
+  return MJ_LIGHTING_TOKEN_GROUPS.find((group) => group.key === key)?.options.find(
+    (option) => option.id === tokenId
+  );
+}
+
+function createLightingPresetId(): string {
+  return `mj-lighting-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 8)}`;
+}
+
+function createBuiltInColorPreset(
+  id: string,
+  name: string,
+  selectedKeywords: Partial<MjColorSelections>,
+  customText = "",
+  negativePrompt = ""
+): MjColorPreset {
+  return {
+    id,
+    name,
+    createdAt: "builtin",
+    builtIn: true,
+    selectedKeywords: {
+      ...createEmptyColorSelections(),
+      ...Object.fromEntries(
+        COLOR_RECIPE_KEYS.map((key) => [
+          key,
+          selectedKeywords[key]?.filter((item) =>
+            hasColorToken(key, item)
+          ) ?? []
+        ])
+      ) as MjColorSelections
+    },
+    customText,
+    negativePrompt
+  };
+}
+
+function createEmptyColorSelections(): MjColorSelections {
+  return {
+    dominantPalette: [],
+    shadowColor: [],
+    highlightColor: [],
+    accentColor: [],
+    saturationContrast: [],
+    grading: []
+  };
+}
+
+function cloneColorSelections(
+  selections: Partial<MjColorSelections> | undefined
+): MjColorSelections {
+  const next = createEmptyColorSelections();
+
+  COLOR_RECIPE_KEYS.forEach((key) => {
+    next[key] = (selections?.[key] ?? []).filter((item) =>
+      hasColorToken(key, item)
+    );
+  });
+
+  return next;
+}
+
+function createColorSelectionsFromRecipe(
+  recipe: AssistantColorRecipe | undefined
+): MjColorSelections {
+  return readStoredColorSelections(recipe?.selectedKeywords);
+}
+
+function createColorRecipeKeywords(
+  selections: MjColorSelections
+): AssistantColorRecipe["selectedKeywords"] {
+  const entries = COLOR_RECIPE_KEYS.map((key) => {
+    const values = selections[key];
+
+    return values.length ? [key, values] : undefined;
+  }).filter((entry): entry is [AssistantColorRecipeKey, string[]] =>
+    Boolean(entry)
+  );
+
+  return entries.length
+    ? Object.fromEntries(entries) as AssistantColorRecipe["selectedKeywords"]
+    : undefined;
+}
+
+function buildMjColorPrompt(
+  selections: MjColorSelections,
+  customText: string
+): string {
+  const dominantPalette = getColorTokenText(
+    "dominantPalette",
+    selections.dominantPalette[0]
+  );
+  const shadowColor = getColorTokenText("shadowColor", selections.shadowColor[0]);
+  const highlightColor = getColorTokenText(
+    "highlightColor",
+    selections.highlightColor[0]
+  );
+  const accentColor = selections.accentColor
+    .map((id) => getColorTokenText("accentColor", id))
+    .filter(Boolean);
+  const saturationContrast = selections.saturationContrast
+    .map((id) => getColorTokenText("saturationContrast", id))
+    .filter(Boolean);
+  const grading = selections.grading
+    .map((id) => getColorTokenText("grading", id))
+    .filter(Boolean);
+  const customClauses = customText
+    .split(/\n/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  return [
+    dominantPalette,
+    shadowColor,
+    highlightColor,
+    ...accentColor,
+    ...saturationContrast,
+    ...grading,
+    ...customClauses
+  ]
+    .filter(Boolean)
+    .join(", ");
+}
+
+function readStoredColorSelections(value: unknown): MjColorSelections {
+  if (!isRecord(value)) {
+    return createEmptyColorSelections();
+  }
+
+  const selections = createEmptyColorSelections();
+
+  COLOR_RECIPE_KEYS.forEach((key) => {
+    selections[key] = readStringArray(value[key]).filter((item) =>
+      hasColorToken(key, item)
+    );
+  });
+
+  return selections;
+}
+
+function readStoredColorKeywords(
+  value: unknown
+): AssistantColorRecipe["selectedKeywords"] {
+  const selections = readStoredColorSelections(value);
+  return createColorRecipeKeywords(selections);
+}
+
+function getColorTokenText(
+  key: AssistantColorRecipeKey,
+  tokenId: string | undefined
+): string {
+  if (!tokenId) {
+    return "";
+  }
+
+  return getColorToken(key, tokenId)?.text ?? "";
+}
+
+function hasColorToken(
+  key: AssistantColorRecipeKey,
+  tokenId: string
+): boolean {
+  return Boolean(getColorToken(key, tokenId));
+}
+
+function getColorToken(
+  key: AssistantColorRecipeKey,
+  tokenId: string
+): MjRecipeToken | undefined {
+  return MJ_COLOR_TOKEN_GROUPS.find((group) => group.key === key)?.options.find(
+    (option) => option.id === tokenId
+  );
+}
+
+function createCompositionPresetId(): string {
+  return `mj-composition-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 8)}`;
+}
+
+function createColorPresetId(): string {
+  return `mj-color-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 8)}`;
+}
+
 function createPresetId(): string {
   return `mj-preset-${Date.now().toString(36)}-${Math.random()
     .toString(36)
@@ -2222,6 +5023,33 @@ function readAssistantDraftState(): AssistantDraftState | undefined {
     identityLock: readBooleanValue(record.identityLock, false),
     photoshopTargetStageId: readPhotoshopStageValue(record.photoshopTargetStageId),
     extraSpecs: readStringValue(record.extraSpecs),
+    compositionRecipeEnabled: readBooleanValue(
+      record.compositionRecipeEnabled,
+      false
+    ),
+    autoCompositionEnabled: readBooleanValue(record.autoCompositionEnabled, true),
+    compositionSource: readRecipeSourceValue(
+      record.compositionSource,
+      record.compositionRecipe ? "manual" : "auto"
+    ),
+    compositionRecipe: readStoredCompositionRecipe(record.compositionRecipe),
+    lightingRecipeEnabled: readBooleanValue(
+      record.lightingRecipeEnabled,
+      Boolean(record.lightingRecipe)
+    ),
+    autoLightingEnabled: readBooleanValue(record.autoLightingEnabled, true),
+    lightingSource: readRecipeSourceValue(
+      record.lightingSource,
+      record.lightingRecipe ? "manual" : "auto"
+    ),
+    lightingRecipe: readStoredLightingRecipe(record.lightingRecipe),
+    colorRecipeEnabled: readBooleanValue(record.colorRecipeEnabled, false),
+    autoColorEnabled: readBooleanValue(record.autoColorEnabled, true),
+    colorSource: readRecipeSourceValue(
+      record.colorSource,
+      record.colorRecipe ? "manual" : "auto"
+    ),
+    colorRecipe: readStoredColorRecipe(record.colorRecipe),
     reverseContext: readStoredReverseContext(record.reverseContext),
     result: readStoredAssistantResult(record.result)
   };
@@ -2251,6 +5079,72 @@ function writeMjParameterPresets(presets: MjParameterPreset[]) {
   );
 }
 
+function readMjCompositionPresets(): MjCompositionPreset[] {
+  const value = readStorageValue(MJ_COMPOSITION_PRESETS_STORAGE_KEY);
+
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map(readStoredMjCompositionPreset)
+    .filter((preset): preset is MjCompositionPreset => Boolean(preset))
+    .slice(0, MAX_MJ_COMPOSITION_PRESETS);
+}
+
+function writeMjCompositionPresets(presets: MjCompositionPreset[]) {
+  writeStorageRecord(
+    MJ_COMPOSITION_PRESETS_STORAGE_KEY,
+    presets
+      .filter((preset) => !preset.builtIn)
+      .slice(0, MAX_MJ_COMPOSITION_PRESETS)
+  );
+}
+
+function readMjLightingPresets(): MjLightingPreset[] {
+  const value = readStorageValue(MJ_LIGHTING_PRESETS_STORAGE_KEY);
+
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map(readStoredMjLightingPreset)
+    .filter((preset): preset is MjLightingPreset => Boolean(preset))
+    .slice(0, MAX_MJ_LIGHTING_PRESETS);
+}
+
+function writeMjLightingPresets(presets: MjLightingPreset[]) {
+  writeStorageRecord(
+    MJ_LIGHTING_PRESETS_STORAGE_KEY,
+    presets
+      .filter((preset) => !preset.builtIn)
+      .slice(0, MAX_MJ_LIGHTING_PRESETS)
+  );
+}
+
+function readMjColorPresets(): MjColorPreset[] {
+  const value = readStorageValue(MJ_COLOR_PRESETS_STORAGE_KEY);
+
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map(readStoredMjColorPreset)
+    .filter((preset): preset is MjColorPreset => Boolean(preset))
+    .slice(0, MAX_MJ_COLOR_PRESETS);
+}
+
+function writeMjColorPresets(presets: MjColorPreset[]) {
+  writeStorageRecord(
+    MJ_COLOR_PRESETS_STORAGE_KEY,
+    presets
+      .filter((preset) => !preset.builtIn)
+      .slice(0, MAX_MJ_COLOR_PRESETS)
+  );
+}
+
 function readStoredMjPreset(value: unknown): MjParameterPreset | undefined {
   if (!isRecord(value)) {
     return undefined;
@@ -2275,6 +5169,143 @@ function readStoredMjPreset(value: unknown): MjParameterPreset | undefined {
     seed: readStringValue(value.seed),
     personalizationCode: readStringValue(value.personalizationCode),
     negativePrompt: readStringValue(value.negativePrompt)
+  };
+}
+
+function readStoredMjCompositionPreset(
+  value: unknown
+): MjCompositionPreset | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const name = readStringValue(value.name).trim();
+
+  if (!name) {
+    return undefined;
+  }
+
+  return {
+    id: readStringValue(value.id) || createCompositionPresetId(),
+    name,
+    createdAt: readStringValue(value.createdAt) || new Date().toISOString(),
+    builtIn: false,
+    selectedKeywords: readStoredCompositionSelections(value.selectedKeywords),
+    customText: readStringValue(value.customText),
+    negativePrompt: readStringValue(value.negativePrompt)
+  };
+}
+
+function readStoredMjLightingPreset(value: unknown): MjLightingPreset | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const name = readStringValue(value.name).trim();
+
+  if (!name) {
+    return undefined;
+  }
+
+  return {
+    id: readStringValue(value.id) || createLightingPresetId(),
+    name,
+    createdAt: readStringValue(value.createdAt) || new Date().toISOString(),
+    builtIn: false,
+    selectedKeywords: readStoredLightingSelections(value.selectedKeywords),
+    customText: readStringValue(value.customText),
+    negativePrompt: readStringValue(value.negativePrompt)
+  };
+}
+
+function readStoredMjColorPreset(value: unknown): MjColorPreset | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const name = readStringValue(value.name).trim();
+
+  if (!name) {
+    return undefined;
+  }
+
+  return {
+    id: readStringValue(value.id) || createColorPresetId(),
+    name,
+    createdAt: readStringValue(value.createdAt) || new Date().toISOString(),
+    builtIn: false,
+    selectedKeywords: readStoredColorSelections(value.selectedKeywords),
+    customText: readStringValue(value.customText),
+    negativePrompt: readStringValue(value.negativePrompt)
+  };
+}
+
+function readStoredCompositionRecipe(
+  value: unknown
+): AssistantCompositionRecipe | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const promptText = readStringValue(value.promptText).trim();
+
+  if (!promptText) {
+    return undefined;
+  }
+
+  return {
+    name: readStringValue(value.name) || "自定义构图",
+    promptText,
+    negativePrompt: readStringValue(value.negativePrompt) || undefined,
+    presetId: readStringValue(value.presetId) || undefined,
+    customText: readStringValue(value.customText) || undefined,
+    selectedKeywords: readStoredCompositionKeywords(value.selectedKeywords)
+  };
+}
+
+function readStoredLightingRecipe(
+  value: unknown
+): AssistantLightingRecipe | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const promptText = readStringValue(value.promptText).trim();
+
+  if (!promptText) {
+    return undefined;
+  }
+
+  return {
+    name: readStringValue(value.name) || "自定义光影",
+    promptText,
+    negativePrompt: readStringValue(value.negativePrompt) || undefined,
+    presetId: readStringValue(value.presetId) || undefined,
+    customText: readStringValue(value.customText) || undefined,
+    selectedKeywords: readStoredLightingKeywords(value.selectedKeywords)
+  };
+}
+
+function readStoredColorRecipe(
+  value: unknown
+): AssistantColorRecipe | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const promptText = readStringValue(value.promptText).trim();
+
+  if (!promptText) {
+    return undefined;
+  }
+
+  return {
+    name: readStringValue(value.name) || "自定义配色",
+    promptText,
+    negativePrompt: readStringValue(value.negativePrompt) || undefined,
+    presetId: readStringValue(value.presetId) || undefined,
+    customText: readStringValue(value.customText) || undefined,
+    selectedKeywords: readStoredColorKeywords(value.selectedKeywords)
   };
 }
 
@@ -2463,6 +5494,13 @@ function readResolutionValue(value: unknown): AssistantResolution {
 
 function readRenderQualityValue(value: unknown): AssistantRenderQuality {
   return value === "sd" ? "sd" : "hd";
+}
+
+function readRecipeSourceValue(
+  value: unknown,
+  fallback: AssistantRecipeSource = "auto"
+): AssistantRecipeSource {
+  return isOneOf(value, ["auto", "manual"] as const) ? value : fallback;
 }
 
 function readPhotoshopStageValue(value: unknown): PhotoshopTargetStageId {

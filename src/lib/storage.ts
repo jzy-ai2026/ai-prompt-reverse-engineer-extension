@@ -14,8 +14,15 @@ import {
   type PromptTemplate
 } from "./promptTemplates";
 import type {
+  AssistantColorRecipe,
+  AssistantColorRecipeKey,
+  AssistantCompositionRecipe,
+  AssistantCompositionRecipeKey,
   AssistantEngine,
+  AssistantLightingRecipe,
+  AssistantLightingRecipeKey,
   AssistantPromptInput,
+  AssistantRecipeSource,
   AssistantPromptResult,
   AssistantReverseContext,
   AssistantRenderQuality
@@ -33,6 +40,30 @@ const MAX_ASSISTANT_HISTORY_ITEMS = 20;
 const MAX_ASSISTANT_FAVORITE_ITEMS = 100;
 const MAX_HISTORY_REFERENCE_IMAGES = 6;
 const MAX_HISTORY_INLINE_IMAGE_BYTES = 120_000;
+const LIGHTING_RECIPE_KEYS: AssistantLightingRecipeKey[] = [
+  "shadowShapes",
+  "shadowTargets",
+  "shadowEdges",
+  "contrast",
+  "shadowSources",
+  "fillLights"
+];
+const COMPOSITION_RECIPE_KEYS: AssistantCompositionRecipeKey[] = [
+  "shotSize",
+  "cameraAngle",
+  "lens",
+  "structure",
+  "focalHierarchy",
+  "artistLogic"
+];
+const COLOR_RECIPE_KEYS: AssistantColorRecipeKey[] = [
+  "dominantPalette",
+  "shadowColor",
+  "highlightColor",
+  "accentColor",
+  "saturationContrast",
+  "grading"
+];
 
 export const DEFAULT_API_BASE_URL =
   import.meta.env.VITE_DEFAULT_API_BASE_URL ||
@@ -727,8 +758,150 @@ function normalizeStoredAssistantInput(
     weird: readOptionalNumber(record.weird),
     seed: readOptionalString(record.seed),
     negativePrompt: readOptionalString(record.negativePrompt),
-    personalizationCode: readOptionalString(record.personalizationCode)
+    personalizationCode: readOptionalString(record.personalizationCode),
+    compositionRecipe: normalizeStoredAssistantCompositionRecipe(
+      record.compositionRecipe
+    ),
+    compositionRecipeEnabled:
+      typeof record.compositionRecipeEnabled === "boolean"
+        ? record.compositionRecipeEnabled
+        : undefined,
+    autoCompositionEnabled:
+      typeof record.autoCompositionEnabled === "boolean"
+        ? record.autoCompositionEnabled
+        : undefined,
+    compositionSource:
+      readAssistantRecipeSource(record.compositionSource) ??
+      (record.compositionRecipe ? "manual" : undefined),
+    lightingRecipe: normalizeStoredAssistantLightingRecipe(record.lightingRecipe),
+    lightingRecipeEnabled:
+      typeof record.lightingRecipeEnabled === "boolean"
+        ? record.lightingRecipeEnabled
+        : undefined,
+    autoLightingEnabled:
+      typeof record.autoLightingEnabled === "boolean"
+        ? record.autoLightingEnabled
+        : undefined,
+    lightingSource:
+      readAssistantRecipeSource(record.lightingSource) ??
+      (record.lightingRecipe ? "manual" : undefined),
+    colorRecipe: normalizeStoredAssistantColorRecipe(record.colorRecipe),
+    colorRecipeEnabled:
+      typeof record.colorRecipeEnabled === "boolean"
+        ? record.colorRecipeEnabled
+        : undefined,
+    autoColorEnabled:
+      typeof record.autoColorEnabled === "boolean"
+        ? record.autoColorEnabled
+        : undefined,
+    colorSource:
+      readAssistantRecipeSource(record.colorSource) ??
+      (record.colorRecipe ? "manual" : undefined)
   };
+}
+
+function normalizeStoredAssistantCompositionRecipe(
+  value: unknown
+): AssistantCompositionRecipe | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const promptText = readOptionalString(value.promptText);
+
+  if (!promptText) {
+    return undefined;
+  }
+
+  return {
+    name: readOptionalString(value.name) ?? "自定义构图",
+    promptText,
+    negativePrompt: readOptionalString(value.negativePrompt),
+    presetId: readOptionalString(value.presetId),
+    customText: readOptionalString(value.customText),
+    selectedKeywords: normalizeStoredRecipeKeywords(
+      value.selectedKeywords,
+      COMPOSITION_RECIPE_KEYS
+    )
+  };
+}
+
+function normalizeStoredAssistantLightingRecipe(
+  value: unknown
+): AssistantLightingRecipe | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const promptText = readOptionalString(value.promptText);
+
+  if (!promptText) {
+    return undefined;
+  }
+
+  const name = readOptionalString(value.name) ?? "自定义光影";
+
+  return {
+    name,
+    promptText,
+    negativePrompt: readOptionalString(value.negativePrompt),
+    presetId: readOptionalString(value.presetId),
+    customText: readOptionalString(value.customText),
+    selectedKeywords: normalizeStoredLightingKeywords(value.selectedKeywords)
+  };
+}
+
+function normalizeStoredLightingKeywords(
+  value: unknown
+): AssistantLightingRecipe["selectedKeywords"] {
+  return normalizeStoredRecipeKeywords(value, LIGHTING_RECIPE_KEYS);
+}
+
+function normalizeStoredAssistantColorRecipe(
+  value: unknown
+): AssistantColorRecipe | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const promptText = readOptionalString(value.promptText);
+
+  if (!promptText) {
+    return undefined;
+  }
+
+  return {
+    name: readOptionalString(value.name) ?? "自定义配色",
+    promptText,
+    negativePrompt: readOptionalString(value.negativePrompt),
+    presetId: readOptionalString(value.presetId),
+    customText: readOptionalString(value.customText),
+    selectedKeywords: normalizeStoredRecipeKeywords(
+      value.selectedKeywords,
+      COLOR_RECIPE_KEYS
+    )
+  };
+}
+
+function normalizeStoredRecipeKeywords<K extends string>(
+  value: unknown,
+  keys: K[]
+): Partial<Record<K, string[]>> | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const entries = keys.map((key) => {
+    const values = readOptionalStringArray(value[key]);
+
+    return values.length ? [key, values] : undefined;
+  }).filter((entry): entry is [K, string[]] =>
+    Boolean(entry)
+  );
+
+  return entries.length
+    ? Object.fromEntries(entries) as Partial<Record<K, string[]>>
+    : undefined;
 }
 
 function normalizeStoredAssistantReverseContext(
@@ -923,6 +1096,12 @@ function readAssistantRenderQuality(
   value: unknown
 ): AssistantRenderQuality | undefined {
   return isOneOf(value, ["sd", "hd"]) ? value : undefined;
+}
+
+function readAssistantRecipeSource(
+  value: unknown
+): AssistantRecipeSource | undefined {
+  return isOneOf(value, ["auto", "manual"]) ? value : undefined;
 }
 
 function readOptionalStringArray(value: unknown): string[] {
