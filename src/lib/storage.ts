@@ -19,13 +19,22 @@ import type {
   AssistantCompositionRecipe,
   AssistantCompositionRecipeKey,
   AssistantEngine,
+  AssistantAspectRatio,
   AssistantLightingRecipe,
   AssistantLightingRecipeKey,
   AssistantPromptInput,
   AssistantRecipeSource,
   AssistantPromptResult,
   AssistantReverseContext,
-  AssistantRenderQuality
+  AssistantRenderQuality,
+  GptImage2DebugInfo,
+  GptImage2GameGenre,
+  GptImage2GameUseCase,
+  GptImage2LayoutType,
+  GptImage2OptimizeStrength,
+  GptImage2ReferenceMode,
+  GptImage2TaskMode,
+  GptImage2TextPolicy
 } from "./openaiClient";
 import { normalizeAssistantAspectRatio } from "./openaiClient";
 
@@ -149,6 +158,7 @@ export interface HistoryReferenceImage {
 
 export const DEFAULT_MODEL_PRESETS = [
   "gemini-3.1-pro-preview-customtools",
+  "gpt-5.5",
   "nanobanana2",
   "nanobananapro",
   "gpt-4o",
@@ -796,7 +806,35 @@ function normalizeStoredAssistantInput(
         : undefined,
     colorSource:
       readAssistantRecipeSource(record.colorSource) ??
-      (record.colorRecipe ? "manual" : undefined)
+      (record.colorRecipe ? "manual" : undefined),
+    gptImage2: normalizeStoredGptImage2Options(record.gptImage2)
+  };
+}
+
+function normalizeStoredGptImage2Options(
+  value: unknown
+): StoredAssistantPromptInput["gptImage2"] {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  return {
+    taskMode: readGptImage2TaskMode(value.taskMode),
+    referenceMode: readGptImage2ReferenceMode(value.referenceMode),
+    targetAspectRatio: readGptImage2TargetAspectRatio(value.targetAspectRatio),
+    layoutType: readGptImage2LayoutType(value.layoutType),
+    optimizeStrength: readGptImage2OptimizeStrength(value.optimizeStrength),
+    textPolicy: readGptImage2TextPolicy(value.textPolicy),
+    exactText: readOptionalString(value.exactText),
+    seed:
+      typeof value.seed === "number" && Number.isInteger(value.seed) && value.seed > 0
+        ? value.seed
+        : undefined,
+    gameModeEnabled: typeof value.gameModeEnabled === "boolean"
+      ? value.gameModeEnabled
+      : false,
+    gameUseCase: readGptImage2GameUseCase(value.gameUseCase),
+    gameGenre: readGptImage2GameGenre(value.gameGenre)
   };
 }
 
@@ -959,6 +997,9 @@ function normalizeStoredAssistantResult(value: unknown): AssistantPromptResult {
       record.chineseReview ??
       record.chinese_review
   );
+  const debugInfo = normalizeStoredGptImage2DebugInfo(
+    record.debugInfo ?? record.debug_info
+  );
 
   return {
     brief: readString(record.brief, ""),
@@ -968,7 +1009,8 @@ function normalizeStoredAssistantResult(value: unknown): AssistantPromptResult {
     negativeConstraints: readOptionalStringArray(
       record.negativeConstraints ?? record.negative_constraints
     ),
-    ...(chineseCheck ? { chineseCheck } : {})
+    ...(chineseCheck ? { chineseCheck } : {}),
+    ...(debugInfo ? { debugInfo } : {})
   };
 }
 
@@ -1010,6 +1052,95 @@ function normalizeStoredAssistantChineseCheck(
   };
 }
 
+function normalizeStoredGptImage2DebugInfo(
+  value: unknown
+): GptImage2DebugInfo | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const input = isRecord(value.input) ? value.input : {};
+  const finalPrompt = readString(value.final_prompt, "");
+  const referenceSummary = readString(value.reference_summary, "");
+
+  if (!finalPrompt && !referenceSummary && !value.raw_output) {
+    return undefined;
+  }
+
+  return {
+    input: {
+      task_mode: readGptImage2TaskMode(input.task_mode),
+      reference_mode:
+        readGptImage2ReferenceMode(input.reference_mode) ?? "auto",
+      layout_type: readGptImage2LayoutType(input.layout_type),
+      optimize_strength: readGptImage2OptimizeStrength(input.optimize_strength),
+      text_policy: readGptImage2TextPolicy(input.text_policy),
+      target_aspect_ratio: readString(
+        input.target_aspect_ratio,
+        readString(input.aspect_ratio, "16:9")
+      ),
+      aspect_ratio: readString(input.aspect_ratio, "16:9"),
+      direction: readString(input.direction, "横版构图"),
+      has_exact_text: Boolean(input.has_exact_text),
+      subject_image_count: readOptionalNumber(input.subject_image_count) ?? 0,
+      reference_image_count: readOptionalNumber(input.reference_image_count) ?? 0,
+      format_warnings: readOptionalStringArray(input.format_warnings),
+      game_mode_enabled: Boolean(input.game_mode_enabled),
+      game_use_case: readGptImage2GameUseCase(input.game_use_case),
+      game_genre: readGptImage2GameGenre(input.game_genre),
+      game_prompt_guidance: readOptionalStringArray(input.game_prompt_guidance),
+      audit_warnings: readOptionalStringArray(input.audit_warnings),
+      seed:
+        typeof input.seed === "number" && Number.isInteger(input.seed) && input.seed > 0
+          ? input.seed
+          : undefined,
+      model: readOptionalString(input.model)
+    },
+    image_mapping: normalizeStoredGptImage2ImageMapping(value.image_mapping),
+    parse_status: value.parse_status === "fallback" ? "fallback" : "parsed",
+    raw_output: readString(value.raw_output, ""),
+    final_prompt: finalPrompt,
+    reference_summary: referenceSummary,
+    schema_result: isRecord(value.schema_result) ? value.schema_result : undefined,
+    renderer_input: isRecord(value.renderer_input)
+      ? value.renderer_input
+      : undefined
+  };
+}
+
+function normalizeStoredGptImage2ImageMapping(
+  value: unknown
+): GptImage2DebugInfo["image_mapping"] {
+  const record = isRecord(value) ? value : {};
+
+  return {
+    subject_images: normalizeStoredGptImage2DebugItems(record.subject_images),
+    reference_images: normalizeStoredGptImage2DebugItems(record.reference_images),
+    style_images: normalizeStoredGptImage2DebugItems(record.style_images),
+    composition_images: normalizeStoredGptImage2DebugItems(
+      record.composition_images
+    ),
+    color_lighting_images: normalizeStoredGptImage2DebugItems(
+      record.color_lighting_images
+    ),
+    layout_images: normalizeStoredGptImage2DebugItems(record.layout_images)
+  };
+}
+
+function normalizeStoredGptImage2DebugItems(
+  value: unknown
+): GptImage2DebugInfo["image_mapping"]["subject_images"] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter(isRecord).map((item) => ({
+    label: readString(item.label, ""),
+    role: readAssistantReferenceRole(item.role),
+    sourceTitle: readOptionalString(item.sourceTitle)
+  }));
+}
+
 function createAssistantHistorySummary(
   input: StoredAssistantPromptInput,
   result: AssistantPromptResult
@@ -1019,18 +1150,35 @@ function createAssistantHistorySummary(
       input.idea ||
       (input.engine === "midjourney-v8.1"
         ? "Midjourney V8.1 提示词"
-        : "Nano Banana Pro 提示词"),
+        : input.engine === "gpt-image-2"
+          ? "GPT-Image-2 提示词"
+          : "Nano Banana Pro 提示词"),
     42
   );
   const referenceCount = input.references.length;
-  const modeLabel = input.mode === "editing" ? "改图" : "生图";
+  const modeLabel =
+    input.engine === "gpt-image-2"
+      ? "优化"
+      : input.mode === "editing" ? "改图" : "生图";
   const engineLabel =
-    input.engine === "midjourney-v8.1" ? "MJ V8.1" : "Nano Banana Pro";
+    input.engine === "midjourney-v8.1"
+      ? "MJ V8.1"
+      : input.engine === "gpt-image-2"
+        ? "GPT-Image-2"
+        : "Nano Banana Pro";
   const qualityLabel =
     input.engine === "midjourney-v8.1"
       ? (input.renderQuality ?? "hd").toUpperCase()
-      : input.resolution;
-  const subtitle = `${engineLabel} · ${modeLabel} · ${input.aspectRatio} · ${qualityLabel}${
+      : input.engine === "gpt-image-2"
+        ? input.gptImage2?.taskMode === "draft"
+          ? input.gptImage2?.layoutType ?? "draft"
+          : input.gptImage2?.referenceMode ?? "auto"
+        : input.resolution;
+  const aspectLabel =
+    input.engine === "gpt-image-2"
+      ? input.gptImage2?.targetAspectRatio ?? input.aspectRatio
+      : input.aspectRatio;
+  const subtitle = `${engineLabel} · ${modeLabel} · ${aspectLabel} · ${qualityLabel}${
     referenceCount ? ` · ${referenceCount} 图` : ""
   }`;
 
@@ -1045,9 +1193,91 @@ function createAssistantFavoriteKey(
 }
 
 function readAssistantEngine(value: unknown): AssistantEngine {
-  return isOneOf(value, ["nano-banana-pro", "midjourney-v8.1"])
+  return isOneOf(value, ["nano-banana-pro", "midjourney-v8.1", "gpt-image-2"])
     ? value
     : "nano-banana-pro";
+}
+
+function readGptImage2ReferenceMode(
+  value: unknown
+): GptImage2ReferenceMode | undefined {
+  return isOneOf(value, [
+    "auto",
+    "full_reference",
+    "style_only",
+    "composition_only",
+    "color_lighting_only",
+    "layout_only"
+  ])
+    ? value
+    : undefined;
+}
+
+function readGptImage2TaskMode(value: unknown): GptImage2TaskMode {
+  return isOneOf(value, ["draft", "reference"]) ? value : "reference";
+}
+
+function readGptImage2LayoutType(value: unknown): GptImage2LayoutType {
+  return isOneOf(value, [
+    "auto",
+    "pure_visual",
+    "poster",
+    "ecommerce",
+    "social_cover",
+    "ui_mockup",
+    "game_visual"
+  ])
+    ? value
+    : "auto";
+}
+
+function readGptImage2OptimizeStrength(
+  value: unknown
+): GptImage2OptimizeStrength {
+  return isOneOf(value, ["standard", "enhanced"]) ? value : "standard";
+}
+
+function readGptImage2TextPolicy(value: unknown): GptImage2TextPolicy {
+  return isOneOf(value, ["none", "preserve", "enhance", "generate"])
+    ? value
+    : "preserve";
+}
+
+function readGptImage2GameUseCase(value: unknown): GptImage2GameUseCase {
+  return isOneOf(value, [
+    "none",
+    "ingame_screenshot",
+    "environment_concept",
+    "character_concept",
+    "boss_arena",
+    "asset_breakdown",
+    "ui_screenshot"
+  ])
+    ? value
+    : "none";
+}
+
+function readGptImage2GameGenre(value: unknown): GptImage2GameGenre {
+  return isOneOf(value, [
+    "auto",
+    "wuxia",
+    "fantasy",
+    "sci_fi",
+    "realistic",
+    "stylized"
+  ])
+    ? value
+    : "auto";
+}
+
+function readGptImage2TargetAspectRatio(
+  value: unknown
+): "auto" | AssistantAspectRatio | undefined {
+  if (value === "auto") {
+    return "auto";
+  }
+
+  return normalizeAssistantAspectRatio(value);
 }
 
 function readAssistantMode(value: unknown): StoredAssistantPromptInput["mode"] {

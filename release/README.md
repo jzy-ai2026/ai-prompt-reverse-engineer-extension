@@ -6,14 +6,22 @@
 
 | 用途 | 链接 | 说明 |
 | --- | --- | --- |
-| 最新稳定版 | [下载 v0.4.3 插件 zip](./ai-prompt-reverse-engineer-extension-v0.4.3.zip) | 推荐发给同事，固定版本，便于回溯 |
-| 最新版备份包 | [下载 latest 插件 zip](./ai-prompt-reverse-engineer-extension-latest.zip) | 当前内容与 `v0.4.3` 相同 |
+| 最新稳定版 | [下载 v0.4.4 插件 zip](./ai-prompt-reverse-engineer-extension-v0.4.4.zip) | 推荐发给同事，固定版本，便于回溯 |
+| 最新版备份包 | [下载 latest 插件 zip](./ai-prompt-reverse-engineer-extension-latest.zip) | 当前内容与 `v0.4.4` 相同 |
 
-- 当前最新版本：`v0.4.3`
-- 更新时间：`2026-05-21`
+- 当前最新版本：`v0.4.4`
+- 更新时间：`2026-05-26`
 - 插件包大小：约 `150 KB`
 
 ## 最近更新
+
+### v0.4.4：GPT-Image-2 提示词助手增强
+
+- GPT-Image-2 助手新增 `参考图优化` 与 `无图 Prompt 草案` 两种任务模式。
+- 无图草案按 schema parser -> normalize -> renderer 流程输出六段式强分段 Prompt，强化文字、画幅、构图和限制条件可控性。
+- 参考图优化继续保留 `subject_image` / `reference_image` 角色逻辑，输出自然段 `optimized_prompt` 与 `reference_summary`。
+- 新增画面类型、优化强度、文字策略和默认关闭的游戏用途增强。
+- 新增 GPT-Image-2 新字段的历史、收藏和草稿恢复兼容。
 
 ### v0.4.3：Midjourney V8.1 双引擎助手
 
@@ -96,4 +104,4 @@ icons/
 
 ## 推荐给同事的话术
 
-> 请下载 `v0.4.3` 插件 zip，解压后在 Chrome/Edge 的扩展程序页面打开“开发者模式”，选择“加载已解压的扩展程序”，然后选中解压后直接包含 `manifest.json` 的文件夹。新版提示词助手支持 Nano Banana Pro 和 Midjourney V8.1 两个引擎。
+> 请下载 `v0.4.4` 插件 zip，解压后在 Chrome/Edge 的扩展程序页面打开“开发者模式”，选择“加载已解压的扩展程序”，然后选中解压后直接包含 `manifest.json` 的文件夹。新版提示词助手支持 Nano Banana Pro、Midjourney V8.1 和 GPT-Image-2 提示词优化。

@@ -29,7 +29,14 @@ import type {
   AssistantReferenceRole,
   AssistantReverseContext,
   AssistantRenderQuality,
-  AssistantResolution
+  AssistantResolution,
+  GptImage2GameGenre,
+  GptImage2GameUseCase,
+  GptImage2LayoutType,
+  GptImage2OptimizeStrength,
+  GptImage2ReferenceMode,
+  GptImage2TaskMode,
+  GptImage2TextPolicy
 } from "../../lib/openaiClient";
 import {
   normalizeAssistantAspectRatio,
@@ -193,7 +200,103 @@ const ASSISTANT_ENGINES: Array<{
     value: "midjourney-v8.1",
     label: "Midjourney V8.1",
     hint: "按 V8.1 官方参数规则生成英文 MJ Prompt。"
+  },
+  {
+    value: "gpt-image-2",
+    label: "GPT-Image-2",
+    hint: "按参考图和主体图角色生成 GPT-Image-2 图生图中文提示词。"
   }
+];
+
+const GPT_IMAGE_2_REFERENCE_MODES: Array<{
+  value: GptImage2ReferenceMode;
+  label: string;
+  hint: string;
+}> = [
+  { value: "auto", label: "自动判断", hint: "根据需求和参考图自动选择参考范围。" },
+  { value: "full_reference", label: "综合参考", hint: "综合参考风格、构图、色彩、光影、版式和人物参与关系。" },
+  { value: "style_only", label: "只参考风格", hint: "只参考整体风格、材质、摄影感和视觉气质。" },
+  { value: "composition_only", label: "只参考构图", hint: "只参考主体位置、画面重心、留白、视角和主体关系。" },
+  { value: "color_lighting_only", label: "只参考色光", hint: "只参考色彩系统、冷暖关系、明暗和光影氛围。" },
+  { value: "layout_only", label: "只参考版式", hint: "只参考图文关系、标题区、信息层级和版面节奏。" }
+];
+
+const GPT_IMAGE_2_TASK_MODES: Array<{
+  value: GptImage2TaskMode;
+  label: string;
+  hint: string;
+}> = [
+  {
+    value: "reference",
+    label: "参考图优化",
+    hint: "继续使用当前 subject_image / reference_image 逻辑，至少需要一张参考图。"
+  },
+  {
+    value: "draft",
+    label: "无图 Prompt 草案",
+    hint: "只根据文字需求、补充规格和可选游戏用途生成 Image-2 提示词草案。"
+  }
+];
+
+const GPT_IMAGE_2_LAYOUT_TYPES: Array<{
+  value: GptImage2LayoutType;
+  label: string;
+  hint: string;
+}> = [
+  { value: "auto", label: "自动判断", hint: "根据用户需求自动判断画面结构。" },
+  { value: "pure_visual", label: "纯画面", hint: "无标题区和信息栏，适合摄影、插画、概念图。" },
+  { value: "poster", label: "图文海报", hint: "可包含标题、副标题和图文排版层级。" },
+  { value: "ecommerce", label: "电商主图", hint: "适合商品、卖点、促销信息和主图结构。" },
+  { value: "social_cover", label: "社媒封面", hint: "适合视频封面、直播封面和平台封面。" },
+  { value: "ui_mockup", label: "UI Mockup", hint: "适合应用界面、仪表盘、信息图和屏幕设计。" },
+  { value: "game_visual", label: "游戏视觉", hint: "适合游戏截图、概念图、角色、BOSS、资产和 HUD。" }
+];
+
+const GPT_IMAGE_2_OPTIMIZE_STRENGTHS: Array<{
+  value: GptImage2OptimizeStrength;
+  label: string;
+  hint: string;
+}> = [
+  { value: "standard", label: "标准", hint: "优先稳定、清晰、商业可控和约束保真。" },
+  { value: "enhanced", label: "增强", hint: "优先创意、视觉冲击和设计感，但不改核心主题。" }
+];
+
+const GPT_IMAGE_2_TEXT_POLICIES: Array<{
+  value: GptImage2TextPolicy;
+  label: string;
+  hint: string;
+}> = [
+  { value: "none", label: "不加文字", hint: "不主动生成标题、卖点、品牌区、信息栏或其他可读文字。" },
+  { value: "preserve", label: "保留原文", hint: "指定文案逐字保留，适合必须准确出现的文字。" },
+  { value: "enhance", label: "优化原文", hint: "保留核心含义，改成更适合画面的表达。" },
+  { value: "generate", label: "自动生成", hint: "根据主题生成必要画面文字；增强模式下作为核心文案锚点。" }
+];
+
+const GPT_IMAGE_2_GAME_USE_CASES: Array<{
+  value: GptImage2GameUseCase;
+  label: string;
+  hint: string;
+}> = [
+  { value: "none", label: "不指定", hint: "不添加游戏用途约束。" },
+  { value: "ingame_screenshot", label: "游戏内效果图", hint: "真实 in-game camera / screenshot、可操作空间、环境层次，不默认加 HUD。" },
+  { value: "environment_concept", label: "场景概念图", hint: "世界观、地貌、建筑、光影、探索路径和空间层次。" },
+  { value: "character_concept", label: "角色概念图", hint: "身份、轮廓、服装装备、材质和可制作性。" },
+  { value: "boss_arena", label: "BOSS 场景", hint: "尺度对比、战斗空间、低机位或越肩构图。" },
+  { value: "asset_breakdown", label: "资产拆分", hint: "模块化、材质边界、道具/建筑拆分。" },
+  { value: "ui_screenshot", label: "UI 截图", hint: "HUD、信息层级、界面布局和游戏截图可信度。" }
+];
+
+const GPT_IMAGE_2_GAME_GENRES: Array<{
+  value: GptImage2GameGenre;
+  label: string;
+  hint: string;
+}> = [
+  { value: "auto", label: "自动判断", hint: "从用户需求中判断类型和风格。" },
+  { value: "wuxia", label: "武侠", hint: "东方动作、冷兵器、门派、江湖和写实武侠气质。" },
+  { value: "fantasy", label: "奇幻", hint: "魔法、异世界、巨构建筑、史诗气质。" },
+  { value: "sci_fi", label: "科幻", hint: "未来科技、机甲、空间站、硬表面材质。" },
+  { value: "realistic", label: "写实", hint: "真实材质、可信光影、摄影机或游戏引擎质感。" },
+  { value: "stylized", label: "风格化", hint: "夸张造型、强视觉识别和非写实美术方向。" }
 ];
 
 const RENDER_QUALITIES: Array<{
@@ -295,6 +398,19 @@ interface AssistantDraftState {
   autoColorEnabled: boolean;
   colorSource: AssistantRecipeSource;
   colorRecipe?: AssistantColorRecipe;
+  gptImage2?: {
+    taskMode: GptImage2TaskMode;
+    referenceMode: GptImage2ReferenceMode;
+    targetAspectRatio: "auto" | AssistantAspectRatio;
+    layoutType: GptImage2LayoutType;
+    optimizeStrength: GptImage2OptimizeStrength;
+    textPolicy: GptImage2TextPolicy;
+    exactText: string;
+    seed: string;
+    gameModeEnabled: boolean;
+    gameUseCase: GptImage2GameUseCase;
+    gameGenre: GptImage2GameGenre;
+  };
   reverseContext?: AssistantReverseContext;
   result?: AssistantPromptResult | null;
 }
@@ -938,6 +1054,51 @@ export function NanoBananaAssistant({
       assistantDraft?.photoshopTargetStageId ?? ""
   );
   const [extraSpecs, setExtraSpecs] = useState(assistantDraft?.extraSpecs ?? "");
+  const [gptImage2TaskMode, setGptImage2TaskMode] =
+    useState<GptImage2TaskMode>(
+      assistantDraft?.gptImage2?.taskMode ?? "reference"
+    );
+  const [gptImage2ReferenceMode, setGptImage2ReferenceMode] =
+    useState<GptImage2ReferenceMode>(
+      assistantDraft?.gptImage2?.referenceMode ?? "auto"
+    );
+  const [gptImage2TargetAspectRatio, setGptImage2TargetAspectRatio] = useState<
+    "auto" | AssistantAspectRatio
+  >(
+    assistantDraft?.gptImage2?.targetAspectRatio ??
+      (assistantDraft?.engine === "gpt-image-2"
+        ? assistantDraft.aspectRatio
+        : "auto")
+  );
+  const [gptImage2LayoutType, setGptImage2LayoutType] =
+    useState<GptImage2LayoutType>(
+      assistantDraft?.gptImage2?.layoutType ?? "auto"
+    );
+  const [gptImage2OptimizeStrength, setGptImage2OptimizeStrength] =
+    useState<GptImage2OptimizeStrength>(
+      assistantDraft?.gptImage2?.optimizeStrength ?? "standard"
+    );
+  const [gptImage2TextPolicy, setGptImage2TextPolicy] =
+    useState<GptImage2TextPolicy>(
+      assistantDraft?.gptImage2?.textPolicy ?? "preserve"
+    );
+  const [gptImage2ExactText, setGptImage2ExactText] = useState(
+    assistantDraft?.gptImage2?.exactText ?? ""
+  );
+  const [gptImage2Seed, setGptImage2Seed] = useState(
+    assistantDraft?.gptImage2?.seed ?? ""
+  );
+  const [gptImage2GameModeEnabled, setGptImage2GameModeEnabled] = useState(
+    assistantDraft?.gptImage2?.gameModeEnabled ?? false
+  );
+  const [gptImage2GameUseCase, setGptImage2GameUseCase] =
+    useState<GptImage2GameUseCase>(
+      assistantDraft?.gptImage2?.gameUseCase ?? "none"
+    );
+  const [gptImage2GameGenre, setGptImage2GameGenre] =
+    useState<GptImage2GameGenre>(
+      assistantDraft?.gptImage2?.gameGenre ?? "auto"
+    );
   const [compositionRecipeEnabled, setCompositionRecipeEnabled] = useState(
     assistantDraft?.compositionRecipeEnabled ?? false
   );
@@ -1049,6 +1210,7 @@ export function NanoBananaAssistant({
   );
   const activeReverseContext = reverseContext ?? fallbackReverseContext;
   const isMidjourney = engine === "midjourney-v8.1";
+  const isGptImage2 = engine === "gpt-image-2";
   const compositionPresets = useMemo(
     () => [...BUILT_IN_MJ_COMPOSITION_PRESETS, ...customCompositionPresets],
     [customCompositionPresets]
@@ -1320,6 +1482,19 @@ export function NanoBananaAssistant({
       autoColorEnabled,
       colorSource,
       colorRecipe: currentColorRecipe,
+      gptImage2: {
+        taskMode: gptImage2TaskMode,
+        referenceMode: gptImage2ReferenceMode,
+        targetAspectRatio: gptImage2TargetAspectRatio,
+        layoutType: gptImage2LayoutType,
+        optimizeStrength: gptImage2OptimizeStrength,
+        textPolicy: gptImage2TextPolicy,
+        exactText: gptImage2ExactText,
+        seed: gptImage2Seed,
+        gameModeEnabled: gptImage2GameModeEnabled,
+        gameUseCase: gptImage2GameUseCase,
+        gameGenre: gptImage2GameGenre
+      },
       reverseContext: activeReverseContext,
       result
     });
@@ -1339,6 +1514,17 @@ export function NanoBananaAssistant({
     currentLightingRecipe,
     engine,
     extraSpecs,
+    gptImage2ExactText,
+    gptImage2GameGenre,
+    gptImage2GameModeEnabled,
+    gptImage2GameUseCase,
+    gptImage2LayoutType,
+    gptImage2OptimizeStrength,
+    gptImage2ReferenceMode,
+    gptImage2Seed,
+    gptImage2TaskMode,
+    gptImage2TextPolicy,
+    gptImage2TargetAspectRatio,
     idea,
     identityLock,
     isStylizeDirty,
@@ -1423,10 +1609,19 @@ export function NanoBananaAssistant({
     isMidjourney && !normalizedMjAspectRatio
       ? "MJ 画幅比例必须是正整数:正整数，例如 7:3、85:110 或 1920:1080。"
       : "";
-  const displayAspectRatio = getAssistantAspectRatioForEngine(engine, aspectRatio);
+  const activeGptImage2TargetAspectRatio = readGptImage2TargetAspectRatioValue(
+    gptImage2TargetAspectRatio,
+    "auto"
+  );
+  const displayAspectRatio = isGptImage2
+    ? formatGptImage2TargetAspectRatio(activeGptImage2TargetAspectRatio)
+    : getAssistantAspectRatioForEngine(engine, aspectRatio);
+  const isGptImage2DraftMode = isGptImage2 && gptImage2TaskMode === "draft";
+  const needsGptImage2References = isGptImage2 && gptImage2TaskMode !== "draft";
   const hasReverseContext = Boolean(activeReverseContext);
   const canGenerate =
-    (idea.trim().length > 0 || hasReverseContext) &&
+    (idea.trim().length > 0 || (!isGptImage2 && hasReverseContext)) &&
+    (!needsGptImage2References || references.length > 0) &&
     !aspectRatioError &&
     !isLoading &&
     !disabled;
@@ -1439,9 +1634,68 @@ export function NanoBananaAssistant({
       label: "定稿 HD",
       hint: "V8.1 原生 2K，高细节，适合最终候选。"
     };
+  const currentGptImage2ReferenceMode =
+    GPT_IMAGE_2_REFERENCE_MODES.find(
+      (item) => item.value === gptImage2ReferenceMode
+    ) ?? GPT_IMAGE_2_REFERENCE_MODES[0]!;
+  const currentGptImage2TaskMode =
+    GPT_IMAGE_2_TASK_MODES.find((item) => item.value === gptImage2TaskMode) ??
+    GPT_IMAGE_2_TASK_MODES[0]!;
+  const currentGptImage2LayoutType =
+    GPT_IMAGE_2_LAYOUT_TYPES.find((item) => item.value === gptImage2LayoutType) ??
+    GPT_IMAGE_2_LAYOUT_TYPES[0]!;
+  const currentGptImage2OptimizeStrength =
+    GPT_IMAGE_2_OPTIMIZE_STRENGTHS.find(
+      (item) => item.value === gptImage2OptimizeStrength
+    ) ?? GPT_IMAGE_2_OPTIMIZE_STRENGTHS[0]!;
+  const currentGptImage2TextPolicy =
+    GPT_IMAGE_2_TEXT_POLICIES.find((item) => item.value === gptImage2TextPolicy) ??
+    GPT_IMAGE_2_TEXT_POLICIES[1]!;
+  const currentGptImage2GameUseCase =
+    GPT_IMAGE_2_GAME_USE_CASES.find((item) => item.value === gptImage2GameUseCase) ??
+    GPT_IMAGE_2_GAME_USE_CASES[0]!;
+  const currentGptImage2GameGenre =
+    GPT_IMAGE_2_GAME_GENRES.find((item) => item.value === gptImage2GameGenre) ??
+    GPT_IMAGE_2_GAME_GENRES[0]!;
   const activeQualityHint = isMidjourney
     ? currentRenderQuality.hint
+    : isGptImage2
+      ? currentGptImage2TaskMode.hint
     : RESOLUTION_HINTS[resolution];
+  const assistantHeroKicker = isMidjourney
+    ? "MIDJOURNEY V8.1 提示词"
+    : isGptImage2
+      ? isGptImage2DraftMode
+        ? "GPT-IMAGE-2 无图草案"
+        : "GPT-IMAGE-2 图生图提示词"
+      : "NANO BANANA PRO 提示词";
+  const assistantTaskLabel = isGptImage2
+    ? currentGptImage2TaskMode.label
+    : currentMode?.label ?? "自动判断";
+  const assistantMetricLabel = isMidjourney
+    ? `${renderQuality.toUpperCase()} · ${displayAspectRatio}`
+    : isGptImage2
+      ? `${currentGptImage2TaskMode.label} · ${displayAspectRatio}`
+      : `${resolution} · ${displayAspectRatio}`;
+  const assistantOutputTitle = isGptImage2
+    ? isGptImage2DraftMode
+      ? "GPT-Image-2 无图 Prompt 草案"
+      : "GPT-Image-2 图生图提示词"
+    : isMidjourney
+      ? "最终 MJ Prompt"
+      : "最终英文提示词";
+  const assistantCopyTooltip = isGptImage2
+    ? isGptImage2DraftMode
+      ? "复制 GPT-Image-2 Prompt 草案"
+      : "复制 GPT-Image-2 优化提示词"
+    : "复制最终英文提示词";
+  const assistantPrimaryActionLabel = isGptImage2
+    ? isGptImage2DraftMode
+      ? "生成 Image-2 Prompt 草案"
+      : "优化参考图 Prompt"
+    : isMidjourney
+      ? "生成 MJ Prompt"
+      : "生成提示词";
   const photoshopTargetStage =
     PHOTOSHOP_TARGET_STAGES.find((stage) => stage.value === photoshopTargetStageId) ??
     PHOTOSHOP_TARGET_STAGES[0];
@@ -1469,7 +1723,29 @@ export function NanoBananaAssistant({
         title: "缺少想法",
         message: isMidjourney
           ? "先写下你想让 Midjourney V8.1 生成什么。"
-          : "先写下你想让 Nano Banana Pro 生成或修改什么。",
+          : isGptImage2
+            ? "先写下你想让 GPT-Image-2 生成什么画面。"
+            : "先写下你想让 Nano Banana Pro 生成或修改什么。",
+        canRetry: false
+      });
+      return;
+    }
+
+    if (isGptImage2 && !idea.trim()) {
+      setError({
+        code: "missing_config",
+        title: "缺少需求",
+        message: "GPT-Image-2 提示词优化需要先填写原始图像需求。",
+        canRetry: false
+      });
+      return;
+    }
+
+    if (needsGptImage2References && !references.length) {
+      setError({
+        code: "image_not_found",
+        title: "缺少参考图",
+        message: "GPT-Image-2 图生图提示词优化至少需要一张参考图。",
         canRetry: false
       });
       return;
@@ -1589,7 +1865,22 @@ export function NanoBananaAssistant({
       colorRecipe: isMidjourney ? activeColorRecipe : undefined,
       colorRecipeEnabled: isMidjourney ? colorRecipeEnabled : undefined,
       autoColorEnabled: isMidjourney ? autoColorEnabled : undefined,
-      colorSource: isMidjourney ? colorSource : undefined
+      colorSource: isMidjourney ? colorSource : undefined,
+      gptImage2: isGptImage2
+        ? {
+            taskMode: gptImage2TaskMode,
+            referenceMode: gptImage2ReferenceMode,
+            targetAspectRatio: activeGptImage2TargetAspectRatio,
+            layoutType: gptImage2LayoutType,
+            optimizeStrength: gptImage2OptimizeStrength,
+            textPolicy: gptImage2TextPolicy,
+            exactText: gptImage2ExactText.trim(),
+            seed: readOptionalPositiveInteger(gptImage2Seed),
+            gameModeEnabled: gptImage2GameModeEnabled,
+            gameUseCase: gptImage2GameUseCase,
+            gameGenre: gptImage2GameGenre
+          }
+        : undefined
     };
   }
 
@@ -2342,6 +2633,29 @@ export function NanoBananaAssistant({
     setPersonalizationCode(item.input.personalizationCode ?? "");
     setIdentityLock(item.input.identityLock);
     setExtraSpecs(item.input.extraSpecs ?? "");
+    setGptImage2TaskMode(item.input.gptImage2?.taskMode ?? "reference");
+    setGptImage2ReferenceMode(item.input.gptImage2?.referenceMode ?? "auto");
+    setGptImage2TargetAspectRatio(
+      readGptImage2TargetAspectRatioValue(
+        item.input.gptImage2?.targetAspectRatio ??
+          (item.input.engine === "gpt-image-2" ? item.input.aspectRatio : "auto"),
+        "auto"
+      )
+    );
+    setGptImage2ExactText(item.input.gptImage2?.exactText ?? "");
+    setGptImage2Seed(
+      item.input.gptImage2?.seed ? String(item.input.gptImage2.seed) : ""
+    );
+    setGptImage2LayoutType(item.input.gptImage2?.layoutType ?? "auto");
+    setGptImage2OptimizeStrength(
+      item.input.gptImage2?.optimizeStrength ?? "standard"
+    );
+    setGptImage2TextPolicy(item.input.gptImage2?.textPolicy ?? "preserve");
+    setGptImage2GameModeEnabled(
+      item.input.gptImage2?.gameModeEnabled ?? false
+    );
+    setGptImage2GameUseCase(item.input.gptImage2?.gameUseCase ?? "none");
+    setGptImage2GameGenre(item.input.gptImage2?.gameGenre ?? "auto");
     setCompositionRecipeEnabled(
       item.input.compositionRecipeEnabled ??
         Boolean(item.input.compositionRecipe?.promptText)
@@ -2419,7 +2733,7 @@ export function NanoBananaAssistant({
       >
         <div className="assistant-hero-title">
           <span className="hero-kicker">
-            {isMidjourney ? "MIDJOURNEY V8.1 提示词" : "NANO BANANA PRO 提示词"}
+            {assistantHeroKicker}
           </span>
           <h2>提示词助手</h2>
         </div>
@@ -2443,36 +2757,50 @@ export function NanoBananaAssistant({
               </Tooltip>
             ))}
           </div>
-          <div
-            className="assistant-mode-grid assistant-hero-segmented"
-            role="tablist"
-            aria-label="任务类型"
-          >
-            {ASSISTANT_MODES.map((item) => (
-              <Tooltip content={item.hint} key={item.value}>
-                <button
-                  className={mode === item.value ? "active" : ""}
-                  type="button"
-                  role="tab"
-                  aria-selected={mode === item.value}
-                  onClick={() => setMode(item.value)}
-                >
-                  {item.label}
-                </button>
-              </Tooltip>
-            ))}
-          </div>
+          {!isGptImage2 && (
+            <div
+              className="assistant-mode-grid assistant-hero-segmented"
+              role="tablist"
+              aria-label="任务类型"
+            >
+              {ASSISTANT_MODES.map((item) => (
+                <Tooltip content={item.hint} key={item.value}>
+                  <button
+                    className={mode === item.value ? "active" : ""}
+                    type="button"
+                    role="tab"
+                    aria-selected={mode === item.value}
+                    onClick={() => setMode(item.value)}
+                  >
+                    {item.label}
+                  </button>
+                </Tooltip>
+              ))}
+            </div>
+          )}
         </div>
         <div className="hero-metrics">
-          <Tooltip content="当前已加入多图参考队列的图片数量">
+          <Tooltip
+            content={
+              isGptImage2DraftMode
+                ? "无图草案不需要参考图，可只输入文字需求。"
+                : "当前已加入多图参考队列的图片数量"
+            }
+          >
             <span>
               <ImageIcon size={14} />
-              {mixImages.length ? `${mixImages.length} / 6 张参考图` : "纯文本"}
+              {mixImages.length
+                ? `${mixImages.length} / 6 张参考图`
+                : isGptImage2DraftMode
+                  ? "纯文本草案"
+                  : isGptImage2
+                  ? "缺参考图"
+                  : "纯文本"}
             </span>
           </Tooltip>
           <Tooltip content={`${activeQualityHint} 当前画幅为 ${displayAspectRatio}。`}>
             <span>
-              {isMidjourney ? renderQuality.toUpperCase() : resolution} · {displayAspectRatio}
+              {assistantMetricLabel}
             </span>
           </Tooltip>
         </div>
@@ -2485,7 +2813,7 @@ export function NanoBananaAssistant({
               <h2>编辑</h2>
               <p>
                 {currentEngine?.label ?? "Nano Banana Pro"} ·{" "}
-                {currentMode?.label ?? "自动判断"} · {displayAspectRatio}
+                {assistantTaskLabel} · {displayAspectRatio}
               </p>
             </div>
             <Tooltip content={currentEngine?.hint ?? "选择目标模型后生成英文提示词"}>
@@ -2501,6 +2829,12 @@ export function NanoBananaAssistant({
                   <span>V8.1 会输出英文完整画面句子，并把参数统一放到末尾。</span>
                   <span>本地参考图会用占位 URL，使用前需要上传到 MJ 或 Discord 替换。</span>
                   <span>V8.1 不支持 --cref、--oref、--q、--draft 或 :: 多重提示。</span>
+                </>
+              ) : isGptImage2 ? (
+                <>
+                  <span>GPT-Image-2 模式会分析参考图角色，输出图生图 optimized_prompt。</span>
+                  <span>单图只作为 reference_image；多图中身份/产品参考才作为 subject_image。</span>
+                  <span>需要画面文字时请填写指定文案；输出区的中文核对会展示 reference_summary。</span>
                 </>
               ) : (
                 <>
@@ -2563,6 +2897,8 @@ export function NanoBananaAssistant({
               placeholder={
                 isMidjourney
                   ? "例如：国风武侠竹林电影画面，两名侠客在夕阳雾气中飞身交手，写实电影剧照。"
+                  : isGptImage2
+                    ? "例如：做一张夏日饮品社交封面，玻璃杯气泡水和柠檬片，清爽高端，画面文字写“清爽一夏”。"
                   : "例如：生成一个国风武侠场景，角色站在雨夜古街中央，画面有电影海报质感。"
               }
             />
@@ -2616,6 +2952,27 @@ export function NanoBananaAssistant({
                     </span>
                   )}
                 </div>
+              ) : isGptImage2 ? (
+                <Tooltip content="GPT-Image-2 可使用 Auto，让优化器根据需求和参考图自然决定画幅；选择固定比例时会要求提示词明确适配该比例。">
+                  <select
+                    value={activeGptImage2TargetAspectRatio}
+                    onChange={(event) =>
+                      setGptImage2TargetAspectRatio(
+                        readGptImage2TargetAspectRatioValue(
+                          event.target.value,
+                          "auto"
+                        )
+                      )
+                    }
+                  >
+                    <option value="auto">Auto 自动画幅</option>
+                    {ASPECT_RATIOS.map((item) => (
+                      <option value={item} key={item}>
+                        {ASPECT_RATIO_LABELS[item]}
+                      </option>
+                    ))}
+                  </select>
+                </Tooltip>
               ) : (
                 <Tooltip content="决定最终画面的宽高关系，例如海报常用 4:5 或 9:16，横版封面常用 16:9。">
                   <select
@@ -2652,6 +3009,26 @@ export function NanoBananaAssistant({
                   </select>
                 </Tooltip>
               </label>
+            ) : isGptImage2 ? (
+              <label className="field-label">
+                <span>任务模式</span>
+                <Tooltip content={currentGptImage2TaskMode.hint}>
+                  <select
+                    value={gptImage2TaskMode}
+                    onChange={(event) =>
+                      setGptImage2TaskMode(
+                        event.target.value as GptImage2TaskMode
+                      )
+                    }
+                  >
+                    {GPT_IMAGE_2_TASK_MODES.map((item) => (
+                      <option value={item.value} key={item.value}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                </Tooltip>
+              </label>
             ) : (
               <label className="field-label">
                 <span>分辨率</span>
@@ -2673,16 +3050,233 @@ export function NanoBananaAssistant({
             )}
           </div>
 
-          <Tooltip content="用于人物、角色或产品一致性任务，会要求模型不要改年龄、脸型、比例和核心识别特征。">
-            <label className="identity-lock-toggle">
-              <input
-                type="checkbox"
-                checked={identityLock}
-                onChange={(event) => setIdentityLock(event.target.checked)}
-              />
-              <span>身份锁定</span>
-            </label>
-          </Tooltip>
+          {!isGptImage2 && (
+            <Tooltip content="用于人物、角色或产品一致性任务，会要求模型不要改年龄、脸型、比例和核心识别特征。">
+              <label className="identity-lock-toggle">
+                <input
+                  type="checkbox"
+                  checked={identityLock}
+                  onChange={(event) => setIdentityLock(event.target.checked)}
+                />
+                <span>身份锁定</span>
+              </label>
+            </Tooltip>
+          )}
+
+          {isGptImage2 && (
+            <details
+              className="assistant-mj-panel assistant-gpt-panel"
+              aria-label="GPT-Image-2 提示词优化参数"
+              open
+            >
+              <summary className="assistant-mj-header">
+                <div>
+                  <strong>GPT-Image-2 提示词控制器</strong>
+                  <span>
+                    {currentGptImage2TaskMode.label} · {currentGptImage2LayoutType.label} · {displayAspectRatio}
+                  </span>
+                </div>
+                <span className="assistant-mj-summary-meta">
+                  {isGptImage2DraftMode ? "schema draft" : "img2img reference"}
+                </span>
+              </summary>
+
+              <div className="assistant-mj-help">
+                {isGptImage2DraftMode ? (
+                  <>
+                    <span>无图草案会先解析 schema，再按官方 Image prompt 结构渲染最终提示词。</span>
+                    <span>该模式只输出 Prompt，不调用真实 GPT-Image-2 文生图。</span>
+                  </>
+                ) : (
+                  <>
+                    <span>参考图会随请求上传给网关模型，用于分析 subject_image 与 reference_image 的职责。</span>
+                    <span>输出会解析为 optimized_prompt 和 reference_summary，后续图像生成节点仍需传入同一组图片。</span>
+                  </>
+                )}
+              </div>
+
+              <div className="assistant-gpt-control-grid">
+                <label className="field-label">
+                  <span>画面类型</span>
+                  <Tooltip content={currentGptImage2LayoutType.hint}>
+                    <select
+                      value={gptImage2LayoutType}
+                      onChange={(event) =>
+                        setGptImage2LayoutType(
+                          event.target.value as GptImage2LayoutType
+                        )
+                      }
+                    >
+                      {GPT_IMAGE_2_LAYOUT_TYPES.map((item) => (
+                        <option value={item.value} key={item.value}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                  </Tooltip>
+                </label>
+
+                <label className="field-label">
+                  <span>优化强度</span>
+                  <Tooltip content={currentGptImage2OptimizeStrength.hint}>
+                    <select
+                      value={gptImage2OptimizeStrength}
+                      onChange={(event) =>
+                        setGptImage2OptimizeStrength(
+                          event.target.value as GptImage2OptimizeStrength
+                        )
+                      }
+                    >
+                      {GPT_IMAGE_2_OPTIMIZE_STRENGTHS.map((item) => (
+                        <option value={item.value} key={item.value}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                  </Tooltip>
+                </label>
+
+                <label className="field-label">
+                  <span>文字策略</span>
+                  <Tooltip content={currentGptImage2TextPolicy.hint}>
+                    <select
+                      value={gptImage2TextPolicy}
+                      onChange={(event) =>
+                        setGptImage2TextPolicy(
+                          event.target.value as GptImage2TextPolicy
+                        )
+                      }
+                    >
+                      {GPT_IMAGE_2_TEXT_POLICIES.map((item) => (
+                        <option value={item.value} key={item.value}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                  </Tooltip>
+                </label>
+
+                {!isGptImage2DraftMode && (
+                  <label className="field-label">
+                    <span>参考模式</span>
+                    <Tooltip content={currentGptImage2ReferenceMode.hint}>
+                      <select
+                        value={gptImage2ReferenceMode}
+                        onChange={(event) =>
+                          setGptImage2ReferenceMode(
+                            event.target.value as GptImage2ReferenceMode
+                          )
+                        }
+                      >
+                        {GPT_IMAGE_2_REFERENCE_MODES.map((item) => (
+                          <option value={item.value} key={item.value}>
+                            {item.label}
+                          </option>
+                        ))}
+                      </select>
+                    </Tooltip>
+                  </label>
+                )}
+              </div>
+
+              <label className="field-label">
+                <span>指定文案</span>
+                <textarea
+                  value={gptImage2ExactText}
+                  onChange={(event) => setGptImage2ExactText(event.target.value)}
+                  rows={2}
+                  placeholder="例如：清爽一夏。需要逐字出现的画面文案请写在这里。"
+                />
+                <span className="assistant-field-hint">
+                  {isGptImage2DraftMode
+                    ? "填写后会作为用户明确文案进入 schema；未填写时按文字策略和用户需求处理。"
+                    : "填写后会作为用户明确文案传入优化器；未填写时由用户需求和参考图文字结构共同决定。"}
+                </span>
+              </label>
+
+              <details className="assistant-gpt-game-panel">
+                <summary>游戏用途</summary>
+                <Tooltip content="启用后，游戏用途会进入 GPT-Image-2 schema，不启用时不影响现有输出。">
+                  <label className="identity-lock-toggle assistant-mj-toggle">
+                    <input
+                      type="checkbox"
+                      checked={gptImage2GameModeEnabled}
+                      onChange={(event) => {
+                        setGptImage2GameModeEnabled(event.target.checked);
+                        if (event.target.checked && gptImage2GameUseCase === "none") {
+                          setGptImage2GameUseCase("ingame_screenshot");
+                        }
+                      }}
+                    />
+                    <span>启用游戏用途增强</span>
+                  </label>
+                </Tooltip>
+
+                <div className="assistant-gpt-control-grid">
+                  <label className="field-label">
+                    <span>用途</span>
+                    <Tooltip content={currentGptImage2GameUseCase.hint}>
+                      <select
+                        value={gptImage2GameUseCase}
+                        disabled={!gptImage2GameModeEnabled}
+                        onChange={(event) =>
+                          setGptImage2GameUseCase(
+                            event.target.value as GptImage2GameUseCase
+                          )
+                        }
+                      >
+                        {GPT_IMAGE_2_GAME_USE_CASES.map((item) => (
+                          <option value={item.value} key={item.value}>
+                            {item.label}
+                          </option>
+                        ))}
+                      </select>
+                    </Tooltip>
+                  </label>
+
+                  <label className="field-label">
+                    <span>类型/风格方向</span>
+                    <Tooltip content={currentGptImage2GameGenre.hint}>
+                      <select
+                        value={gptImage2GameGenre}
+                        disabled={!gptImage2GameModeEnabled}
+                        onChange={(event) =>
+                          setGptImage2GameGenre(
+                            event.target.value as GptImage2GameGenre
+                          )
+                        }
+                      >
+                        {GPT_IMAGE_2_GAME_GENRES.map((item) => (
+                          <option value={item.value} key={item.value}>
+                            {item.label}
+                          </option>
+                        ))}
+                      </select>
+                    </Tooltip>
+                  </label>
+                </div>
+
+                <span className="assistant-field-hint">
+                  {gptImage2GameModeEnabled
+                    ? `${currentGptImage2GameUseCase.hint} ${currentGptImage2GameGenre.hint}`
+                    : "默认关闭；关闭时不会改变 GPT-Image-2 草案或参考图优化。"}
+                </span>
+              </details>
+
+              <details className="assistant-gpt-advanced">
+                <summary>高级参数</summary>
+                <label className="field-label">
+                  <span>Seed</span>
+                  <input
+                    value={gptImage2Seed}
+                    inputMode="numeric"
+                    onChange={(event) => setGptImage2Seed(event.target.value)}
+                    placeholder="可选，例如 1234"
+                  />
+                </label>
+              </details>
+            </details>
+          )}
 
           {isMidjourney && (
             <details className="assistant-lighting-panel" aria-label="MJ 构图与镜头配方">
@@ -3418,6 +4012,8 @@ export function NanoBananaAssistant({
               placeholder={
                 isMidjourney
                   ? "补充镜头、光影、材质、画面文字；不要写 --q、--cref、--oref、:: 等 V8.1 不支持参数。"
+                  : isGptImage2
+                    ? "补充主体、品牌限制、字体风格、禁用元素、必须保留的实体名或画面约束。"
                   : "补充字体、品牌限制、画面文字、禁用元素、不能改变的角色特征等。"
               }
             />
@@ -3426,7 +4022,7 @@ export function NanoBananaAssistant({
           <div className="assistant-reference-list">
             <div className="assistant-reference-header">
               <div>
-                <strong>参考图</strong>
+                <strong>{isGptImage2DraftMode ? "参考图（可选）" : "参考图"}</strong>
                 <span>{mixImages.length} / {MAX_REFERENCE_IMAGE_FILES}</span>
               </div>
               <div className="assistant-reference-actions">
@@ -3444,6 +4040,14 @@ export function NanoBananaAssistant({
                 )}
               </div>
             </div>
+
+            {isGptImage2 && (
+              <p className="assistant-field-hint assistant-gpt-reference-note">
+                {isGptImage2DraftMode
+                  ? "无图 Prompt 草案不要求参考图；需要按 subject_image / reference_image 角色优化时，请切回参考图优化。"
+                  : "至少添加一张参考图。单图按 reference_image 处理；多图中身份/产品角色作为 subject_image，其它角色作为 reference_image。"}
+              </p>
+            )}
 
             <div
               className={
@@ -3592,9 +4196,7 @@ export function NanoBananaAssistant({
               <span>
                 {isLoading
                   ? "生成中"
-                  : isMidjourney
-                    ? "生成 MJ Prompt"
-                    : "生成提示词"}
+                  : assistantPrimaryActionLabel}
               </span>
             </button>
           </Tooltip>
@@ -3667,11 +4269,11 @@ export function NanoBananaAssistant({
 
           <div className="section-header assistant-output-head">
             <div>
-              <h2>最终英文提示词</h2>
+              <h2>{assistantOutputTitle}</h2>
               <p>{result?.brief || "等待生成，英文提示词和中文核对会显示在这里"}</p>
             </div>
             <div className="button-row compact">
-              <Tooltip content="复制最终英文提示词">
+              <Tooltip content={assistantCopyTooltip}>
                 <button
                   type="button"
                   onClick={copyFinalPrompt}
@@ -3696,6 +4298,7 @@ export function NanoBananaAssistant({
             <>
               <div className="assistant-final-prompt">{result.finalPrompt}</div>
               <AssistantChineseCheckPanel check={result.chineseCheck} />
+              <AssistantGptImage2DebugPanel debugInfo={result.debugInfo} />
               <AssistantResultList title="需要确认的问题" items={result.questions} />
               <AssistantResultList title="默认假设" items={result.assumptions} />
               <AssistantResultList
@@ -3905,6 +4508,53 @@ function AssistantChineseCheckPanel({
       )}
       <AssistantCheckList title="核对清单" items={check?.checklist ?? []} />
       <AssistantCheckList title="可能需要确认" items={check?.possibleIssues ?? []} />
+    </details>
+  );
+}
+
+function AssistantGptImage2DebugPanel({
+  debugInfo
+}: {
+  debugInfo: AssistantPromptResult["debugInfo"];
+}) {
+  if (!debugInfo) {
+    return null;
+  }
+
+  return (
+    <details className="assistant-output-block assistant-output-detail assistant-gpt-debug">
+      <summary>
+        <strong>GPT-Image-2 reference debug</strong>
+        <span>{debugInfo.parse_status} · {debugInfo.input.model || "gateway"}</span>
+      </summary>
+      <div className="assistant-gpt-debug-grid">
+        <div>
+          <span>输入</span>
+          <pre>{JSON.stringify(debugInfo.input, null, 2)}</pre>
+        </div>
+        <div>
+          <span>image mapping</span>
+          <pre>{JSON.stringify(debugInfo.image_mapping, null, 2)}</pre>
+        </div>
+        <div>
+          <span>reference summary</span>
+          <pre>{debugInfo.reference_summary}</pre>
+        </div>
+        {debugInfo.input.format_warnings.length > 0 && (
+          <div>
+            <span>format warnings</span>
+            <pre>{debugInfo.input.format_warnings.join("\n")}</pre>
+          </div>
+        )}
+        <div>
+          <span>final prompt</span>
+          <pre>{debugInfo.final_prompt}</pre>
+        </div>
+        <div>
+          <span>raw output</span>
+          <pre>{debugInfo.raw_output}</pre>
+        </div>
+      </div>
     </details>
   );
 }
@@ -5023,6 +5673,7 @@ function readAssistantDraftState(): AssistantDraftState | undefined {
     identityLock: readBooleanValue(record.identityLock, false),
     photoshopTargetStageId: readPhotoshopStageValue(record.photoshopTargetStageId),
     extraSpecs: readStringValue(record.extraSpecs),
+    gptImage2: readStoredGptImage2DraftOptions(record.gptImage2),
     compositionRecipeEnabled: readBooleanValue(
       record.compositionRecipeEnabled,
       false
@@ -5324,6 +5975,7 @@ function readStoredAssistantResult(
   }
 
   const chineseCheck = readStoredChineseCheck(value.chineseCheck);
+  const debugInfo = readStoredGptImage2DebugInfo(value.debugInfo);
 
   return {
     brief,
@@ -5331,8 +5983,131 @@ function readStoredAssistantResult(
     questions: readStringArray(value.questions),
     assumptions: readStringArray(value.assumptions),
     negativeConstraints: readStringArray(value.negativeConstraints),
-    ...(chineseCheck ? { chineseCheck } : {})
+    ...(chineseCheck ? { chineseCheck } : {}),
+    ...(debugInfo ? { debugInfo } : {})
   };
+}
+
+function readStoredGptImage2DraftOptions(
+  value: unknown
+): AssistantDraftState["gptImage2"] {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  return {
+    taskMode: readGptImage2TaskModeValue(value.taskMode, "reference"),
+    referenceMode: readGptImage2ReferenceModeValue(
+      value.referenceMode,
+      "auto"
+    ),
+    targetAspectRatio: readGptImage2TargetAspectRatioValue(
+      value.targetAspectRatio,
+      "auto"
+    ),
+    layoutType: readGptImage2LayoutTypeValue(value.layoutType, "auto"),
+    optimizeStrength: readGptImage2OptimizeStrengthValue(
+      value.optimizeStrength,
+      "standard"
+    ),
+    textPolicy: readGptImage2TextPolicyValue(value.textPolicy, "preserve"),
+    exactText: readStringValue(value.exactText),
+    seed: readStringValue(value.seed),
+    gameModeEnabled: readBooleanValue(value.gameModeEnabled, false),
+    gameUseCase: readGptImage2GameUseCaseValue(value.gameUseCase, "none"),
+    gameGenre: readGptImage2GameGenreValue(value.gameGenre, "auto")
+  };
+}
+
+function readStoredGptImage2DebugInfo(
+  value: unknown
+): AssistantPromptResult["debugInfo"] {
+  if (!isRecord(value) || !isRecord(value.input)) {
+    return undefined;
+  }
+
+  const input = value.input;
+  const seed =
+    typeof input.seed === "number" &&
+    Number.isInteger(input.seed) &&
+    input.seed > 0
+      ? input.seed
+      : undefined;
+
+  return {
+    input: {
+      task_mode: readGptImage2TaskModeValue(input.task_mode, "reference"),
+      reference_mode: readGptImage2ReferenceModeValue(
+        input.reference_mode,
+        "auto"
+      ),
+      layout_type: readGptImage2LayoutTypeValue(input.layout_type, "auto"),
+      optimize_strength: readGptImage2OptimizeStrengthValue(
+        input.optimize_strength,
+        "standard"
+      ),
+      text_policy: readGptImage2TextPolicyValue(input.text_policy, "preserve"),
+      target_aspect_ratio:
+        readStringValue(input.target_aspect_ratio) ||
+        readStringValue(input.aspect_ratio) ||
+        "16:9",
+      aspect_ratio: readStringValue(input.aspect_ratio) || "16:9",
+      direction: readStringValue(input.direction),
+      has_exact_text: Boolean(input.has_exact_text),
+      subject_image_count: readNumberValue(input.subject_image_count, 0),
+      reference_image_count: readNumberValue(input.reference_image_count, 0),
+      format_warnings: readStringArray(input.format_warnings),
+      game_mode_enabled: Boolean(input.game_mode_enabled),
+      game_use_case: readGptImage2GameUseCaseValue(input.game_use_case, "none"),
+      game_genre: readGptImage2GameGenreValue(input.game_genre, "auto"),
+      game_prompt_guidance: readStringArray(input.game_prompt_guidance),
+      audit_warnings: readStringArray(input.audit_warnings),
+      seed,
+      model: readStringValue(input.model) || undefined
+    },
+    image_mapping: readStoredGptImage2ImageMapping(value.image_mapping),
+    parse_status: value.parse_status === "fallback" ? "fallback" : "parsed",
+    raw_output: readStringValue(value.raw_output),
+    final_prompt: readStringValue(value.final_prompt),
+    reference_summary: readStringValue(value.reference_summary),
+    schema_result: isRecord(value.schema_result) ? value.schema_result : undefined,
+    renderer_input: isRecord(value.renderer_input)
+      ? value.renderer_input
+      : undefined
+  };
+}
+
+function readStoredGptImage2ImageMapping(
+  value: unknown
+): NonNullable<AssistantPromptResult["debugInfo"]>["image_mapping"] {
+  const record = isRecord(value) ? value : {};
+
+  return {
+    subject_images: readStoredGptImage2DebugItems(record.subject_images),
+    reference_images: readStoredGptImage2DebugItems(record.reference_images),
+    style_images: readStoredGptImage2DebugItems(record.style_images),
+    composition_images: readStoredGptImage2DebugItems(record.composition_images),
+    color_lighting_images: readStoredGptImage2DebugItems(
+      record.color_lighting_images
+    ),
+    layout_images: readStoredGptImage2DebugItems(record.layout_images)
+  };
+}
+
+function readStoredGptImage2DebugItems(
+  value: unknown
+): NonNullable<
+  AssistantPromptResult["debugInfo"]
+>["image_mapping"]["subject_images"] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter(isRecord).map((item) => ({
+    label: readStringValue(item.label),
+    role: readAssistantReferenceRoleValue(item.role),
+    sourceTitle: readStringValue(item.sourceTitle) || undefined
+  }));
 }
 
 function readStoredChineseCheck(
@@ -5452,7 +6227,142 @@ function readNumberValue(value: unknown, fallback: number): number {
 }
 
 function readAssistantEngineValue(value: unknown): AssistantEngine {
-  return value === "midjourney-v8.1" ? "midjourney-v8.1" : "nano-banana-pro";
+  return isOneOf(value, ["nano-banana-pro", "midjourney-v8.1", "gpt-image-2"] as const)
+    ? value
+    : "nano-banana-pro";
+}
+
+function readGptImage2ReferenceModeValue(
+  value: unknown,
+  fallback: GptImage2ReferenceMode
+): GptImage2ReferenceMode {
+  return isOneOf(
+    value,
+    [
+      "auto",
+      "full_reference",
+      "style_only",
+      "composition_only",
+      "color_lighting_only",
+      "layout_only"
+    ] as const
+  )
+    ? value
+    : fallback;
+}
+
+function readGptImage2TaskModeValue(
+  value: unknown,
+  fallback: GptImage2TaskMode
+): GptImage2TaskMode {
+  return isOneOf(value, ["draft", "reference"] as const) ? value : fallback;
+}
+
+function readGptImage2LayoutTypeValue(
+  value: unknown,
+  fallback: GptImage2LayoutType
+): GptImage2LayoutType {
+  return isOneOf(
+    value,
+    [
+      "auto",
+      "pure_visual",
+      "poster",
+      "ecommerce",
+      "social_cover",
+      "ui_mockup",
+      "game_visual"
+    ] as const
+  )
+    ? value
+    : fallback;
+}
+
+function readGptImage2OptimizeStrengthValue(
+  value: unknown,
+  fallback: GptImage2OptimizeStrength
+): GptImage2OptimizeStrength {
+  return isOneOf(value, ["standard", "enhanced"] as const) ? value : fallback;
+}
+
+function readGptImage2TextPolicyValue(
+  value: unknown,
+  fallback: GptImage2TextPolicy
+): GptImage2TextPolicy {
+  return isOneOf(
+    value,
+    ["none", "preserve", "enhance", "generate"] as const
+  )
+    ? value
+    : fallback;
+}
+
+function readGptImage2GameUseCaseValue(
+  value: unknown,
+  fallback: GptImage2GameUseCase
+): GptImage2GameUseCase {
+  return isOneOf(
+    value,
+    [
+      "none",
+      "ingame_screenshot",
+      "environment_concept",
+      "character_concept",
+      "boss_arena",
+      "asset_breakdown",
+      "ui_screenshot"
+    ] as const
+  )
+    ? value
+    : fallback;
+}
+
+function readGptImage2GameGenreValue(
+  value: unknown,
+  fallback: GptImage2GameGenre
+): GptImage2GameGenre {
+  return isOneOf(
+    value,
+    ["auto", "wuxia", "fantasy", "sci_fi", "realistic", "stylized"] as const
+  )
+    ? value
+    : fallback;
+}
+
+function readGptImage2TargetAspectRatioValue(
+  value: unknown,
+  fallback: "auto" | AssistantAspectRatio
+): "auto" | AssistantAspectRatio {
+  if (value === "auto") {
+    return "auto";
+  }
+
+  return normalizeAssistantAspectRatio(value) ?? fallback;
+}
+
+function formatGptImage2TargetAspectRatio(
+  value: "auto" | AssistantAspectRatio
+): string {
+  return value === "auto" ? "Auto 自动画幅" : value;
+}
+
+function readAssistantReferenceRoleValue(
+  value: unknown
+): AssistantReferenceRole {
+  return isOneOf(
+    value,
+    [
+      "identity",
+      "style",
+      "composition",
+      "scene",
+      "product",
+      "text",
+      "material"
+    ] as const
+  )
+    ? value
+    : "style";
 }
 
 function readAssistantModeValue(value: unknown): AssistantPromptMode {
@@ -5565,6 +6475,11 @@ function isInteractiveDragTarget(target: EventTarget): boolean {
 function readNumericInput(value: string, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function readOptionalPositiveInteger(value: string): number | undefined {
+  const parsed = Number(value.trim());
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 function getMidjourneyStylizePreset(

@@ -5740,6 +5740,89 @@ body:has(.app-shell.is-floating-surface) {
   border-bottom: 1px solid rgba(36, 45, 39, 0.08);
 }
 
+.assistant-gpt-panel {
+  display: grid;
+}
+
+.assistant-gpt-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+}
+
+.assistant-gpt-control-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.assistant-gpt-game-panel {
+  padding: 7px 8px;
+  border: 1px solid rgba(36, 45, 39, 0.08);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.48);
+}
+
+.assistant-gpt-game-panel summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 900;
+  color: var(--muted-strong);
+}
+
+.assistant-gpt-game-panel .assistant-gpt-control-grid {
+  margin-top: 8px;
+}
+
+.assistant-gpt-advanced {
+  padding: 7px 8px;
+  border: 1px solid rgba(36, 45, 39, 0.08);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.56);
+}
+
+.assistant-gpt-advanced summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 900;
+  color: var(--muted-strong);
+}
+
+.assistant-gpt-advanced .field-label {
+  margin-top: 8px;
+}
+
+.assistant-gpt-reference-note {
+  margin: 0;
+}
+
+.assistant-gpt-debug-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.assistant-gpt-debug-grid > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.assistant-gpt-debug-grid span {
+  color: var(--muted-strong);
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.assistant-gpt-debug-grid pre {
+  max-height: 240px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+}
+
 .assistant-mj-help {
   border-color: rgba(36, 45, 39, 0.08);
   background: rgba(255, 255, 255, 0.58);
