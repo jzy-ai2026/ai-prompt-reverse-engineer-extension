@@ -12,7 +12,7 @@ import {
   analyzeImageStyleCommonPrompt,
   analyzeImagePrompt,
   editPromptDocument,
-  generateNanoBananaAssistantPrompt,
+  generateAssistantPromptWithGateway,
   type ApiProgressEvent,
   type AssistantPromptInput,
   type AssistantPromptResult
@@ -35,6 +35,7 @@ import {
   getSettings,
   removeAssistantHistoryItem,
   removeAssistantFavoriteItem,
+  saveSettings,
   savePrivacyConsent,
   type AssistantFavoriteItem,
   type AssistantHistoryItem,
@@ -44,13 +45,24 @@ import {
 
 const MENU_ANALYZE_IMAGE = "prompt-reverse:analyze-image";
 const MENU_ADD_TO_MIX = "prompt-reverse:add-to-mix";
+const MENU_COPY_TAB_TO_WORKSPACE = "prompt-reverse:copy-tab-to-workspace";
 const CONSENT_TIMEOUT_MS = 5 * 60 * 1000;
 const HEARTBEAT_INTERVAL_MS = 15_000;
+const PANEL_SURFACE_HEARTBEAT_TTL_MS = 12_000;
 const MAX_MIX_IMAGES = 6;
 const MIX_IMAGES_KEY = "mixImages";
+const WORKSPACE_SESSION_KEY = "promptReverseWorkspaces";
+const DEFAULT_WORKSPACE_ID = "workspace_default";
+const POPUP_WIDTH = 520;
+const POPUP_HEIGHT = 760;
+const POPUP_BASE_LEFT = 120;
+const POPUP_BASE_TOP = 80;
+const POPUP_OFFSET_STEP = 28;
+const POPUP_OFFSET_LIMIT = 7;
 
 type TaskStatus =
   | "idle"
+  | "queued"
   | "awaiting_consent"
   | "preparing"
   | "running"
@@ -62,6 +74,7 @@ type TaskKind = "analyze" | "edit" | "assistant";
 type MultiAnalyzeMode = "style_common" | "batch";
 type TaskMode = "single" | MultiAnalyzeMode;
 type TaskTimingStatus = "done" | "error";
+type PanelSurface = "sidepanel" | "floating" | "popup";
 
 interface CapturedImage {
   url: string;
@@ -72,11 +85,13 @@ interface CapturedImage {
 
 interface TaskState {
   id: string;
+  workspaceId: string;
   kind: TaskKind;
   status: TaskStatus;
   phase?: string;
   message?: string;
   mode?: TaskMode;
+  queuePosition?: number;
   createdAt: string;
   updatedAt: string;
   source?: CapturedImage;
@@ -88,11 +103,30 @@ interface TaskState {
   rawText?: string;
   usedJsonMode?: boolean;
   historySaved?: boolean;
+  input?: unknown;
+  assistantResult?: AssistantPromptResult;
   timings?: TaskTimingEntry[];
   progressPercent?: number;
   progressLabel?: string;
   progressDetail?: string;
   error?: ReturnType<typeof toUserFacingError>;
+}
+
+interface WorkspaceState {
+  id: string;
+  title: string;
+  surface: PanelSurface;
+  windowId?: number;
+  mixImages: CapturedImage[];
+  activeTaskId?: string;
+  lastResultTaskId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface WorkspaceResponse {
+  workspace: WorkspaceState;
+  task: TaskState | null;
 }
 
 interface TaskTimingEntry {
@@ -118,9 +152,22 @@ interface RuntimeResponse<T = unknown> {
   error?: ReturnType<typeof serializeError>;
 }
 
-type RuntimeRequest =
+type RuntimeRequest = { workspaceId?: string } & (
+  | { type: "panel:create-workspace"; surface?: PanelSurface; title?: string }
+  | { type: "panel:get-workspace-state"; surface?: PanelSurface; windowId?: number }
+  | { type: "panel:update-workspace-draft"; title?: string; mixImages?: CapturedImage[] }
+  | { type: "panel:detach-workspace" }
+  | { type: "panel:copy-current-tab" }
+  | { type: "panel:set-max-concurrency"; maxConcurrentTasks: number }
   | { type: "panel:get-state" }
   | { type: "panel:get-mix" }
+  | {
+      type:
+        | "panel:surface-mounted"
+        | "panel:surface-heartbeat"
+        | "panel:surface-unmounted";
+      surface: PanelSurface;
+    }
   | { type: "panel:analyze-image"; image: CapturedImage }
   | { type: "panel:analyze-mix"; images?: CapturedImage[] }
   | {
@@ -172,7 +219,8 @@ type RuntimeRequest =
       input: AssistantPromptInput;
       result: AssistantPromptResult;
       targetStageId?: string;
-    };
+    }
+);
 
 interface AssistantGenerateResponse {
   result: AssistantPromptResult;
@@ -202,9 +250,25 @@ interface ConsentDecision {
 }
 
 let currentTask: TaskState | null = null;
-let activeController: AbortController | null = null;
-let heartbeatTimer: ReturnType<typeof globalThis.setInterval> | undefined;
+let workspaceCounter = 0;
+let popupOffsetIndex = 0;
+let lastFocusedWorkspaceId: string | undefined;
+let isQueuePumpRunning = false;
 let mixImages: CapturedImage[] = [];
+let panelSurfaceLastSeenAt: Record<PanelSurface, number> = {
+  sidepanel: 0,
+  floating: 0,
+  popup: 0
+};
+
+const workspaces = new Map<string, WorkspaceState>();
+const windowWorkspaceIndex = new Map<number, string>();
+const tasks = new Map<string, TaskState>();
+const queuedTaskIds: string[] = [];
+const taskRunners = new Map<string, (controller: AbortController) => Promise<void>>();
+const taskControllers = new Map<string, AbortController>();
+const taskRejecters = new Map<string, (error: unknown) => void>();
+const heartbeatTimers = new Map<string, ReturnType<typeof globalThis.setInterval>>();
 
 const pendingConsent = new Map<
   string,
@@ -225,25 +289,28 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.action.onClicked.addListener((tab) => {
-  void openFloatingPanelOrSidePanel(tab, "toggle");
+  void openPopupWorkspace(tab);
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === MENU_ANALYZE_IMAGE) {
-    const image = createCapturedImage(info, tab);
-    void openFloatingPanelOrSidePanel(tab, "open").then(() => startAnalyzeTask(image));
+    void handleAnalyzeImageContextMenu(info, tab);
     return;
   }
 
   if (info.menuItemId === MENU_ADD_TO_MIX) {
-    const image = createCapturedImage(info, tab);
-    void addMixImages([image]).then(() => openFloatingPanelOrSidePanel(tab, "open"));
+    void handleAddToMixContextMenu(info, tab);
+    return;
+  }
+
+  if (info.menuItemId === MENU_COPY_TAB_TO_WORKSPACE) {
+    void handleCopyTabToWorkspaceContextMenu(tab);
   }
 });
 
 chrome.commands.onCommand.addListener((command, tab) => {
   if (command === "open-panel") {
-    void openFloatingPanelOrSidePanel(tab, "toggle");
+    void openPopupWorkspace(tab);
     return;
   }
 
@@ -260,8 +327,31 @@ chrome.commands.onCommand.addListener((command, tab) => {
   }
 });
 
-chrome.runtime.onMessage.addListener((message: RuntimeRequest, _sender, sendResponse) => {
-  void handleRuntimeMessage(message)
+chrome.windows.onRemoved.addListener((windowId) => {
+  const workspaceId = windowWorkspaceIndex.get(windowId);
+
+  if (!workspaceId) {
+    return;
+  }
+
+  cancelWorkspaceTasks(workspaceId);
+  removeWorkspace(workspaceId);
+});
+
+chrome.windows.onFocusChanged.addListener((windowId) => {
+  if (windowId === chrome.windows.WINDOW_ID_NONE) {
+    return;
+  }
+
+  const workspaceId = windowWorkspaceIndex.get(windowId);
+
+  if (workspaceId) {
+    lastFocusedWorkspaceId = workspaceId;
+  }
+});
+
+chrome.runtime.onMessage.addListener((message: RuntimeRequest, sender, sendResponse) => {
+  void handleRuntimeMessage(message, sender)
     .then((data) => {
       sendResponse({ ok: true, data } satisfies RuntimeResponse);
     })
@@ -280,13 +370,19 @@ function setupContextMenus(): void {
     chrome.contextMenus.create({
       id: MENU_ANALYZE_IMAGE,
       title: "反推提示词",
-      contexts: ["image"]
+      contexts: ["all"]
     });
 
     chrome.contextMenus.create({
       id: MENU_ADD_TO_MIX,
       title: "添加到多图参考",
-      contexts: ["image"]
+      contexts: ["all"]
+    });
+
+    chrome.contextMenus.create({
+      id: MENU_COPY_TAB_TO_WORKSPACE,
+      title: "复制当前标签页到任务窗口",
+      contexts: ["page", "selection", "image", "link"]
     });
   });
 }
@@ -299,52 +395,419 @@ async function configureSidePanelBehavior(): Promise<void> {
   }
 }
 
-async function handleRuntimeMessage(message: RuntimeRequest): Promise<unknown> {
+async function handleAnalyzeImageContextMenu(
+  info: chrome.contextMenus.OnClickData,
+  tab?: chrome.tabs.Tab
+): Promise<void> {
+  const image = await resolveCapturedImage(info, tab);
+  const workspace = await openPopupWorkspace(tab);
+
+  if (!image) {
+    void broadcastError(
+      createAppError("image_not_found", "No image was found under the context menu."),
+      workspace.id
+    );
+    return;
+  }
+
+  await startAnalyzeTask(image, workspace.id);
+}
+
+async function handleAddToMixContextMenu(
+  info: chrome.contextMenus.OnClickData,
+  tab?: chrome.tabs.Tab
+): Promise<void> {
+  const image = await resolveCapturedImage(info, tab);
+
+  if (!image) {
+    const workspace = await openPopupWorkspace(tab);
+    void broadcastError(
+      createAppError("image_not_found", "No image was found under the context menu."),
+      workspace.id
+    );
+    return;
+  }
+
+  const workspace = getLastFocusedWorkspace() ?? (await openPopupWorkspace(tab));
+  await addMixImages([image], workspace.id);
+}
+
+async function handleCopyTabToWorkspaceContextMenu(tab?: chrome.tabs.Tab): Promise<void> {
+  await copyCurrentTabToWorkspace(tab ?? (await getActiveTab()));
+}
+
+async function resolveCapturedImage(
+  info: chrome.contextMenus.OnClickData,
+  tab?: chrome.tabs.Tab
+): Promise<CapturedImage | null> {
+  const directImage = createCapturedImage(info, tab);
+
+  if (directImage.url.trim()) {
+    return directImage;
+  }
+
+  if (!tab?.id) {
+    return null;
+  }
+
+  return getLastImageFromContent(tab);
+}
+
+async function openPopupWorkspace(
+  tab?: chrome.tabs.Tab,
+  title?: string
+): Promise<WorkspaceState> {
+  const workspace = createWorkspace("popup", title ?? createWorkspaceTitle(tab));
+
+  return openPopupForWorkspace(workspace, tab, true);
+}
+
+async function openPopupForWorkspace(
+  workspace: WorkspaceState,
+  tab?: chrome.tabs.Tab,
+  allowFallback = false
+): Promise<WorkspaceState> {
+  const offset = popupOffsetIndex % POPUP_OFFSET_LIMIT;
+  popupOffsetIndex += 1;
+
+  try {
+    const popupWindow = await chrome.windows.create({
+      url: chrome.runtime.getURL(
+        `sidepanel.html?surface=popup&workspaceId=${encodeURIComponent(workspace.id)}`
+      ),
+      type: "popup",
+      width: POPUP_WIDTH,
+      height: POPUP_HEIGHT,
+      left: POPUP_BASE_LEFT + offset * POPUP_OFFSET_STEP,
+      top: POPUP_BASE_TOP + offset * POPUP_OFFSET_STEP,
+      focused: true
+    });
+
+    if (typeof popupWindow.id === "number") {
+      updateWorkspace(workspace.id, { surface: "popup", windowId: popupWindow.id });
+      windowWorkspaceIndex.set(popupWindow.id, workspace.id);
+    }
+  } catch (error) {
+    if (!allowFallback) {
+      throw error;
+    }
+
+    await openFloatingPanelOrSidePanel(tab, "open");
+  }
+
+  lastFocusedWorkspaceId = workspace.id;
+  return getWorkspace(workspace.id);
+}
+
+function createWorkspaceTitle(tab?: chrome.tabs.Tab): string {
+  workspaceCounter += 1;
+  const title = tab?.title?.trim();
+
+  if (title) {
+    return `任务 ${workspaceCounter} · ${truncateWorkspaceTitle(title)}`;
+  }
+
+  return `任务 ${workspaceCounter}`;
+}
+
+function createTabWorkspaceTitle(tab?: chrome.tabs.Tab): string {
+  const title = tab?.title?.trim();
+
+  if (title) {
+    return `标签页 · ${truncateWorkspaceTitle(title)}`;
+  }
+
+  return "标签页";
+}
+
+function truncateWorkspaceTitle(value: string): string {
+  return value.length > 24 ? `${value.slice(0, 24)}...` : value;
+}
+
+function resolveWorkspaceForRequest(
+  message: RuntimeRequest,
+  sender?: chrome.runtime.MessageSender
+): WorkspaceState {
+  const explicitWorkspaceId =
+    message.workspaceId || readWorkspaceIdFromUrl(sender?.url);
+
+  if (explicitWorkspaceId && workspaces.has(explicitWorkspaceId)) {
+    return getWorkspace(explicitWorkspaceId);
+  }
+
+  if (explicitWorkspaceId) {
+    return createWorkspace(
+      readSurfaceFromUrl(sender?.url) ?? messageSurface(message) ?? "popup",
+      undefined,
+      explicitWorkspaceId
+    );
+  }
+
+  return getDefaultWorkspace(messageSurface(message) ?? readSurfaceFromUrl(sender?.url));
+}
+
+function messageSurface(message: RuntimeRequest): PanelSurface | undefined {
+  return "surface" in message ? message.surface : undefined;
+}
+
+function readWorkspaceIdFromUrl(url?: string): string | undefined {
+  if (!url) {
+    return undefined;
+  }
+
+  try {
+    const workspaceId = new URL(url).searchParams.get("workspaceId")?.trim();
+    return workspaceId || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function readSurfaceFromUrl(url?: string): PanelSurface | undefined {
+  if (!url) {
+    return undefined;
+  }
+
+  try {
+    const surface = new URL(url).searchParams.get("surface");
+    return isPanelSurface(surface) ? surface : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isPanelSurface(value: unknown): value is PanelSurface {
+  return value === "sidepanel" || value === "floating" || value === "popup";
+}
+
+function getDefaultWorkspace(surface: PanelSurface = "sidepanel"): WorkspaceState {
+  if (workspaces.has(DEFAULT_WORKSPACE_ID)) {
+    return getWorkspace(DEFAULT_WORKSPACE_ID);
+  }
+
+  return createWorkspace(surface, "默认任务窗口", DEFAULT_WORKSPACE_ID);
+}
+
+function createWorkspace(
+  surface: PanelSurface = "popup",
+  title?: string,
+  requestedId?: string
+): WorkspaceState {
+  const now = new Date().toISOString();
+  const id = requestedId ?? createWorkspaceId();
+  const existing = workspaces.get(id);
+
+  if (existing) {
+    return existing;
+  }
+
+  const workspace: WorkspaceState = {
+    id,
+    title: title?.trim() || "任务窗口",
+    surface,
+    mixImages: [],
+    createdAt: now,
+    updatedAt: now
+  };
+
+  workspaces.set(workspace.id, workspace);
+  void saveWorkspaceSnapshots();
+  return workspace;
+}
+
+function createWorkspaceId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return `workspace_${crypto.randomUUID()}`;
+  }
+
+  return `workspace_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+}
+
+function getWorkspace(workspaceId: string): WorkspaceState {
+  return workspaces.get(workspaceId) ?? createWorkspace("sidepanel", undefined, workspaceId);
+}
+
+function updateWorkspace(
+  workspaceId: string,
+  updates: Partial<WorkspaceState>
+): WorkspaceState {
+  const current = getWorkspace(workspaceId);
+  const next: WorkspaceState = {
+    ...current,
+    ...updates,
+    id: current.id,
+    mixImages: updates.mixImages ?? current.mixImages,
+    updatedAt: new Date().toISOString()
+  };
+
+  workspaces.set(workspaceId, next);
+
+  if (typeof next.windowId === "number") {
+    windowWorkspaceIndex.set(next.windowId, workspaceId);
+  }
+
+  void saveWorkspaceSnapshots();
+  return next;
+}
+
+function removeWorkspace(workspaceId: string): void {
+  const workspace = workspaces.get(workspaceId);
+
+  if (workspace?.windowId !== undefined) {
+    windowWorkspaceIndex.delete(workspace.windowId);
+  }
+
+  workspaces.delete(workspaceId);
+
+  if (lastFocusedWorkspaceId === workspaceId) {
+    lastFocusedWorkspaceId = undefined;
+  }
+
+  void saveWorkspaceSnapshots();
+}
+
+function getLastFocusedWorkspace(): WorkspaceState | undefined {
+  if (lastFocusedWorkspaceId && workspaces.has(lastFocusedWorkspaceId)) {
+    return getWorkspace(lastFocusedWorkspaceId);
+  }
+
+  return Array.from(workspaces.values()).find((workspace) => workspace.surface === "popup");
+}
+
+function getWorkspaceActiveTask(workspaceId: string): TaskState | null {
+  const workspace = getWorkspace(workspaceId);
+
+  if (workspace.activeTaskId && tasks.has(workspace.activeTaskId)) {
+    return tasks.get(workspace.activeTaskId)!;
+  }
+
+  return null;
+}
+
+function loadWorkspaceMixImages(workspaceId: string): CapturedImage[] {
+  return getWorkspace(workspaceId).mixImages;
+}
+
+async function saveWorkspaceSnapshots(): Promise<void> {
+  if (!chrome.storage?.session) {
+    return;
+  }
+
+  try {
+    await chrome.storage.session.set({
+      [WORKSPACE_SESSION_KEY]: Array.from(workspaces.values())
+    });
+  } catch {
+    // Session snapshots are best-effort; running task state remains in memory.
+  }
+}
+
+async function handleRuntimeMessage(
+  message: RuntimeRequest,
+  sender?: chrome.runtime.MessageSender
+): Promise<unknown> {
+  if (message.type === "panel:create-workspace") {
+    return createWorkspace(message.surface ?? "popup", message.title);
+  }
+
+  if (message.type === "panel:copy-current-tab") {
+    return copyCurrentTabToWorkspace(sender?.tab ?? (await getActiveTab()));
+  }
+
+  const workspace = resolveWorkspaceForRequest(message, sender);
+
   switch (message.type) {
+    case "panel:get-workspace-state": {
+      const nextWorkspace = resolveWorkspaceForRequest(message, sender);
+      return {
+        workspace: nextWorkspace,
+        task: getWorkspaceActiveTask(nextWorkspace.id)
+      } satisfies WorkspaceResponse;
+    }
+
+    case "panel:update-workspace-draft": {
+      const updates: Partial<WorkspaceState> = {};
+
+      if (message.title?.trim()) {
+        updates.title = message.title.trim();
+      }
+
+      if (message.mixImages) {
+        updates.mixImages = message.mixImages.filter(isCapturedImage).slice(0, MAX_MIX_IMAGES);
+      }
+
+      return updateWorkspace(workspace.id, updates);
+    }
+
+    case "panel:detach-workspace":
+      return detachWorkspaceToPopup(workspace, sender?.tab);
+
+    case "panel:set-max-concurrency": {
+      const settings = await saveSettings({
+        maxConcurrentTasks: message.maxConcurrentTasks
+      });
+      void pumpTaskQueue();
+      return settings;
+    }
+
+    case "panel:surface-mounted":
+    case "panel:surface-heartbeat":
+      markPanelSurfaceSeen(message.surface);
+      return null;
+
+    case "panel:surface-unmounted":
+      markPanelSurfaceClosed(message.surface);
+      return null;
+
     case "panel:get-state":
-      return currentTask;
+      return getWorkspaceActiveTask(workspace.id);
 
     case "panel:get-mix":
-      return loadMixImages();
+      return loadMixImages(workspace.id);
 
     case "panel:analyze-image":
-      return startAnalyzeTask(message.image);
+      return startAnalyzeTask(message.image, workspace.id);
 
     case "panel:analyze-mix":
-      return startAnalyzeMultiTask("style_common", message.images ?? mixImages);
+      return startAnalyzeMultiTask(
+        "style_common",
+        message.images ?? loadWorkspaceMixImages(workspace.id),
+        workspace.id
+      );
 
     case "panel:analyze-multi":
-      return startAnalyzeMultiTask(message.mode, message.images ?? mixImages);
+      return startAnalyzeMultiTask(
+        message.mode,
+        message.images ?? loadWorkspaceMixImages(workspace.id),
+        workspace.id
+      );
 
     case "panel:add-mix-images":
-      return addMixImages(message.images);
+      return addMixImages(message.images, workspace.id);
 
     case "panel:set-mix-images":
-      return setMixImages(message.images);
+      return setMixImages(message.images, workspace.id);
 
     case "panel:clear-mix":
-      mixImages = [];
-      await saveMixImages(mixImages);
-      void broadcastMixUpdated();
-      return mixImages;
+      return setMixImages([], workspace.id);
 
     case "panel:remove-mix-image":
-      await loadMixImages();
-      mixImages = mixImages.filter((image) => image.url !== message.url);
-      await saveMixImages(mixImages);
-      void broadcastMixUpdated();
-      return mixImages;
+      return setMixImages(
+        loadWorkspaceMixImages(workspace.id).filter((image) => image.url !== message.url),
+        workspace.id
+      );
 
     case "panel:edit-prompt":
       return startEditTask(
         message.document,
         message.instruction,
-        message.visualReferences
+        message.visualReferences,
+        workspace.id
       );
 
     case "panel:cancel-task":
-      cancelCurrentTask(message.taskId);
-      return currentTask;
+      cancelCurrentTask(message.taskId, workspace.id);
+      return getWorkspaceActiveTask(workspace.id);
 
     case "panel:privacy-consent-response":
       return handleConsentResponse(message);
@@ -359,7 +822,7 @@ async function handleRuntimeMessage(message: RuntimeRequest): Promise<unknown> {
       }) satisfies Promise<PromptHistoryItem[]>;
 
     case "panel:generate-assistant-prompt":
-      return generateAssistantPrompt(message.input);
+      return generateAssistantPrompt(message.input, workspace.id);
 
     case "panel:get-assistant-history":
       return getAssistantHistory();
@@ -394,17 +857,80 @@ async function handleRuntimeMessage(message: RuntimeRequest): Promise<unknown> {
       return [];
 
     case "panel:send-assistant-to-photoshop":
-      return sendAssistantPromptToPhotoshop(message.input, message.result, message.targetStageId);
+      return sendAssistantPromptToPhotoshop(
+        message.input,
+        message.result,
+        message.targetStageId,
+        workspace.title
+      );
 
     default:
       throw createAppError("unknown_error", "Unsupported runtime message.");
   }
 }
 
+async function detachWorkspaceToPopup(
+  workspace: WorkspaceState,
+  tab?: chrome.tabs.Tab
+): Promise<WorkspaceState> {
+  return openPopupForWorkspace(workspace, tab, false);
+}
+
+async function copyCurrentTabToWorkspace(tab?: chrome.tabs.Tab): Promise<WorkspaceResponse> {
+  const image = await captureCurrentTabSnapshot(tab);
+  const workspace = await openPopupWorkspace(tab, createTabWorkspaceTitle(tab));
+
+  if (!image) {
+    void broadcastError(
+      createAppError("image_not_found", "当前页面无法截图，已打开空任务窗口。"),
+      workspace.id
+    );
+
+    return {
+      workspace,
+      task: getWorkspaceActiveTask(workspace.id)
+    };
+  }
+
+  await startAnalyzeTask(image, workspace.id);
+
+  return {
+    workspace,
+    task: getWorkspaceActiveTask(workspace.id)
+  };
+}
+
+async function captureCurrentTabSnapshot(tab?: chrome.tabs.Tab): Promise<CapturedImage | null> {
+  if (!tab?.id || isRestrictedUrl(tab.url)) {
+    return null;
+  }
+
+  try {
+    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
+      format: "jpeg",
+      quality: 82
+    });
+
+    if (!dataUrl || !/^data:image\//i.test(dataUrl)) {
+      return null;
+    }
+
+    return {
+      url: dataUrl,
+      sourcePageUrl: tab.url,
+      sourceTitle: tab.title,
+      tabId: tab.id
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function sendAssistantPromptToPhotoshop(
   input: AssistantPromptInput,
   result: AssistantPromptResult,
-  targetStageId?: string
+  targetStageId?: string,
+  workspaceTitle?: string
 ): Promise<PhotoshopInboxResponse> {
   if (!result.finalPrompt?.trim()) {
     throw createAppError("photoshop_bridge_unavailable", "No final prompt to send.");
@@ -421,7 +947,9 @@ async function sendAssistantPromptToPhotoshop(
       headers: {
         "Content-Type": "application/json"
       },
-      body: JSON.stringify(createPromptInboxPayload(input, result, targetStageId)),
+      body: JSON.stringify(
+        createPromptInboxPayload(input, result, targetStageId, workspaceTitle)
+      ),
       signal: controller.signal
     });
     const responseText = await response.text();
@@ -469,13 +997,15 @@ async function sendAssistantPromptToPhotoshop(
 function createPromptInboxPayload(
   input: AssistantPromptInput,
   result: AssistantPromptResult,
-  targetStageId?: string
+  targetStageId?: string,
+  workspaceTitle?: string
 ): Record<string, unknown> {
   const normalizedTargetStageId = typeof targetStageId === "string" ? targetStageId.trim() : "";
 
   return {
     source: "browser-extension",
     sourceApp: "prompt-reverse-engineer-extension",
+    workspaceTitle: workspaceTitle?.trim() || "",
     targetStageId: normalizedTargetStageId,
     idea: input.idea,
     brief: result.brief,
@@ -514,10 +1044,62 @@ function safeReferenceUrl(value: string | undefined): string {
 }
 
 async function generateAssistantPrompt(
-  input: AssistantPromptInput
+  input: AssistantPromptInput,
+  workspaceId: string
 ): Promise<AssistantGenerateResponse> {
   const taskId = createTaskId("assistant");
-  const controller = new AbortController();
+  const createdAt = new Date().toISOString();
+
+  return new Promise((resolve, reject) => {
+    const { signal: _signal, onProgress: _onProgress, ...storedInput } = input;
+
+    taskRejecters.set(taskId, reject);
+    enqueueTask(
+      {
+        id: taskId,
+        workspaceId,
+        kind: "assistant",
+        status: "queued",
+        phase: "queued",
+        message: "任务已加入队列",
+        progressPercent: 0,
+        progressLabel: "排队中",
+        progressDetail: "等待并发空位",
+        createdAt,
+        updatedAt: createdAt,
+        input: storedInput
+      },
+      async (controller) => {
+        try {
+          const response = await runAssistantPromptTask(taskId, input, controller);
+
+          updateCurrentTask(taskId, {
+            status: "done",
+            phase: "done",
+            message: "提示词生成完成",
+            progressPercent: 100,
+            progressLabel: "完成",
+            progressDetail: "助手提示词已生成",
+            assistantResult: response.result,
+            historySaved: true
+          });
+          taskRejecters.delete(taskId);
+          resolve(response);
+        } catch (error) {
+          handleTaskError(taskId, error);
+          taskRejecters.delete(taskId);
+          reject(error);
+        }
+      }
+    );
+  });
+}
+
+async function runAssistantPromptTask(
+  taskId: string,
+  input: AssistantPromptInput,
+  controller: AbortController
+): Promise<AssistantGenerateResponse> {
   const settings = await getSettings();
 
   if (!settings.apiBaseUrl || !settings.apiKey || !settings.model) {
@@ -552,7 +1134,8 @@ async function generateAssistantPrompt(
         sourceTitle: reference.sourceTitle
       } satisfies CapturedImage;
       const preparedImage = await prepareImageForVision(source, {
-        signal: controller.signal
+        signal: controller.signal,
+        onProgress: (event) => handleImageProgress(taskId, event)
       });
 
       historySources.push(source);
@@ -571,7 +1154,7 @@ async function generateAssistantPrompt(
     );
   }
 
-  const result = await generateNanoBananaAssistantPrompt(
+  const result = await generateAssistantPromptWithGateway(
     {
       apiBaseUrl: settings.apiBaseUrl,
       apiKey: settings.apiKey,
@@ -580,7 +1163,8 @@ async function generateAssistantPrompt(
     {
       ...input,
       references: preparedReferences,
-      signal: controller.signal
+      signal: controller.signal,
+      onProgress: (event) => handleApiProgress(taskId, event)
     }
   );
   const { signal: _signal, onProgress: _onProgress, ...storedInput } = {
@@ -596,77 +1180,66 @@ async function generateAssistantPrompt(
   return { result, history };
 }
 
-async function startAnalyzeTask(image: CapturedImage): Promise<TaskState> {
-  cancelCurrentTask();
+async function startAnalyzeTask(
+  image: CapturedImage,
+  workspaceId: string
+): Promise<TaskState> {
 
   const taskId = createTaskId("analyze");
-  const controller = new AbortController();
-  activeController = controller;
+  const createdAt = new Date().toISOString();
 
-  setCurrentTask({
+  return enqueueTask({
     id: taskId,
+    workspaceId,
     kind: "analyze",
-    status: "preparing",
+    status: "queued",
+    phase: "queued",
     mode: "single",
     message: "正在准备图片",
-    progressPercent: 8,
+    progressPercent: 0,
     progressLabel: "准备任务",
     progressDetail: "正在创建图片反推任务",
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+    createdAt,
+    updatedAt: createdAt,
     source: image
-  });
-
-  startHeartbeat(taskId);
-
-  void runAnalyzeTask(taskId, image, controller).finally(() => {
-    stopHeartbeat(taskId);
-  });
-
-  return currentTask!;
+  }, (controller) => runAnalyzeTask(taskId, image, controller));
 }
 
 async function startAnalyzeMultiTask(
   mode: MultiAnalyzeMode,
-  images: CapturedImage[]
+  images: CapturedImage[],
+  workspaceId: string
 ): Promise<TaskState> {
   if (images.length < 2) {
     throw createAppError("image_not_found", "多图分析至少需要 2 张参考图。");
   }
 
-  cancelCurrentTask();
-
   const taskId = createTaskId("analyze");
-  const controller = new AbortController();
-  activeController = controller;
+  const createdAt = new Date().toISOString();
 
-  setCurrentTask({
+  return enqueueTask({
     id: taskId,
+    workspaceId,
     kind: "analyze",
-    status: "preparing",
+    status: "queued",
+    phase: "queued",
     mode,
     message:
       mode === "batch"
         ? `正在准备批量分析：${images.length} 张参考图`
         : `正在准备同风格分析：${images.length} 张参考图`,
-    progressPercent: 8,
+    progressPercent: 0,
     progressLabel: "准备任务",
     progressDetail: mode === "batch" ? "正在创建批量反推任务" : "正在创建同风格分析任务",
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+    createdAt,
+    updatedAt: createdAt,
     source: images[0],
     sources: images
-  });
-
-  startHeartbeat(taskId);
-
-  const task = mode === "batch"
-    ? runAnalyzeBatchTask(taskId, images, controller)
-    : runAnalyzeStyleCommonTask(taskId, images, controller);
-
-  void task.finally(() => stopHeartbeat(taskId));
-
-  return currentTask!;
+  }, (controller) =>
+    mode === "batch"
+      ? runAnalyzeBatchTask(taskId, images, controller)
+      : runAnalyzeStyleCommonTask(taskId, images, controller)
+  );
 }
 
 async function runAnalyzeTask(
@@ -767,9 +1340,7 @@ async function runAnalyzeTask(
   } catch (error) {
     handleTaskError(taskId, error);
   } finally {
-    if (currentTask?.id === taskId) {
-      activeController = null;
-    }
+    taskControllers.delete(taskId);
   }
 }
 
@@ -894,9 +1465,7 @@ async function runAnalyzeStyleCommonTask(
   } catch (error) {
     handleTaskError(taskId, error);
   } finally {
-    if (currentTask?.id === taskId) {
-      activeController = null;
-    }
+    taskControllers.delete(taskId);
   }
 }
 
@@ -1065,50 +1634,41 @@ async function runAnalyzeBatchTask(
   } catch (error) {
     handleTaskError(taskId, error);
   } finally {
-    if (currentTask?.id === taskId) {
-      activeController = null;
-    }
+    taskControllers.delete(taskId);
   }
 }
 
 async function startEditTask(
   document: PromptDocument,
   instruction: string,
-  visualReferences: EditVisualReference[] = []
+  visualReferences: EditVisualReference[] = [],
+  workspaceId: string
 ): Promise<TaskState> {
-  cancelCurrentTask();
-
   const taskId = createTaskId("edit");
-  const controller = new AbortController();
-  activeController = controller;
+  const createdAt = new Date().toISOString();
 
-  setCurrentTask({
+  return enqueueTask({
     id: taskId,
+    workspaceId,
     kind: "edit",
-    status: "running",
-    phase: "editing",
+    status: "queued",
+    phase: "queued",
     message: "正在修改 PromptDocument",
-    progressPercent: 68,
+    progressPercent: 0,
     progressLabel: "编辑提示词",
     progressDetail: visualReferences.length ? "正在结合视觉参考修改 JSON" : "正在按文本指令修改 JSON",
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+    createdAt,
+    updatedAt: createdAt,
     document
-  });
-
-  startHeartbeat(taskId);
-
-  void runEditTask(
-    taskId,
-    document,
-    instruction,
-    visualReferences,
-    controller
-  ).finally(() => {
-    stopHeartbeat(taskId);
-  });
-
-  return currentTask!;
+  }, (controller) =>
+    runEditTask(
+      taskId,
+      document,
+      instruction,
+      visualReferences,
+      controller
+    )
+  );
 }
 
 async function runEditTask(
@@ -1160,9 +1720,7 @@ async function runEditTask(
   } catch (error) {
     handleTaskError(taskId, error);
   } finally {
-    if (currentTask?.id === taskId) {
-      activeController = null;
-    }
+    taskControllers.delete(taskId);
   }
 }
 
@@ -1208,8 +1766,9 @@ function requestPrivacyConsent(taskId: string): Promise<ConsentDecision> {
 
     void broadcast({
       type: "background:privacy-consent-request",
+      workspaceId: tasks.get(taskId)?.workspaceId,
       taskId,
-      source: currentTask?.source
+      source: tasks.get(taskId)?.source
     });
   });
 }
@@ -1222,7 +1781,7 @@ async function handleConsentResponse(message: {
   const pending = pendingConsent.get(message.taskId);
 
   if (!pending) {
-    return currentTask;
+    return tasks.get(message.taskId) ?? currentTask;
   }
 
   globalThis.clearTimeout(pending.timeoutId);
@@ -1232,34 +1791,75 @@ async function handleConsentResponse(message: {
     remember: message.remember
   });
 
-  return currentTask;
+  return tasks.get(message.taskId) ?? currentTask;
 }
 
-function cancelCurrentTask(taskId?: string): void {
-  if (taskId && currentTask?.id !== taskId) {
+function cancelCurrentTask(taskId?: string, workspaceId?: string): void {
+  const targetTaskId =
+    taskId ?? (workspaceId ? getWorkspace(workspaceId).activeTaskId : currentTask?.id);
+
+  if (!targetTaskId) {
     return;
   }
 
-  activeController?.abort();
-  activeController = null;
-
-  if (currentTask) {
-    const pending = pendingConsent.get(currentTask.id);
-
-    if (pending) {
-      globalThis.clearTimeout(pending.timeoutId);
-      pending.resolve({ granted: false, remember: false });
-      pendingConsent.delete(currentTask.id);
-    }
-
-    updateCurrentTask(currentTask.id, {
-      status: "cancelled",
-      phase: "cancelled",
-      message: "任务已取消"
-    });
-  }
+  cancelTaskById(targetTaskId);
 }
 
+function cancelWorkspaceTasks(workspaceId: string): void {
+  Array.from(tasks.values())
+    .filter(
+      (task) =>
+        task.workspaceId === workspaceId &&
+        (task.status === "queued" ||
+          task.status === "awaiting_consent" ||
+          task.status === "preparing" ||
+          task.status === "running")
+    )
+    .forEach((task) => cancelTaskById(task.id));
+}
+
+function cancelTaskById(taskId: string): void {
+  const task = tasks.get(taskId);
+
+  if (!task || task.status === "done" || task.status === "cancelled") {
+    return;
+  }
+
+  const queuedIndex = queuedTaskIds.indexOf(taskId);
+
+  if (queuedIndex >= 0) {
+    queuedTaskIds.splice(queuedIndex, 1);
+  }
+
+  taskControllers.get(taskId)?.abort();
+  taskControllers.delete(taskId);
+  taskRunners.delete(taskId);
+  stopHeartbeat(taskId);
+  resolvePendingConsentAsDenied(taskId);
+  taskRejecters.get(taskId)?.(createAppError("request_cancelled", "Task was cancelled."));
+  taskRejecters.delete(taskId);
+
+  updateCurrentTask(taskId, {
+    status: "cancelled",
+    phase: "cancelled",
+    message: "任务已取消",
+    queuePosition: undefined
+  });
+  updateQueuePositions();
+  void pumpTaskQueue();
+}
+
+function resolvePendingConsentAsDenied(taskId: string): void {
+  const pending = pendingConsent.get(taskId);
+
+  if (!pending) {
+    return;
+  }
+
+  globalThis.clearTimeout(pending.timeoutId);
+  pending.resolve({ granted: false, remember: false });
+  pendingConsent.delete(taskId);
+}
 function handleImageProgress(taskId: string, event: ImagePipelineProgress): void {
   const percentByPhase: Record<ImagePipelineProgress["phase"], number> = {
     checking_url: 32,
@@ -1279,7 +1879,7 @@ function handleImageProgress(taskId: string, event: ImagePipelineProgress): void
     phase: event.phase,
     message: event.message,
     progressPercent: Math.max(
-      currentTask?.progressPercent ?? 0,
+      tasks.get(taskId)?.progressPercent ?? 0,
       percentByPhase[event.phase]
     ),
     progressLabel: labelByPhase[event.phase],
@@ -1310,7 +1910,7 @@ function handleApiProgress(taskId: string, event: ApiProgressEvent): void {
     phase: event.phase,
     message: event.message,
     progressPercent: Math.max(
-      currentTask?.progressPercent ?? 0,
+      tasks.get(taskId)?.progressPercent ?? 0,
       percentByPhase[event.phase]
     ),
     progressLabel: labelByPhase[event.phase],
@@ -1367,11 +1967,13 @@ async function measureTaskStep<T>(
 }
 
 function appendTaskTiming(taskId: string, timing: TaskTimingEntry): void {
-  if (!currentTask || currentTask.id !== taskId) {
+  const task = tasks.get(taskId);
+
+  if (!task) {
     return;
   }
 
-  const timings = [...(currentTask.timings ?? []), timing].slice(-80);
+  const timings = [...(task.timings ?? []), timing].slice(-80);
   console.info("[AI Prompt Reverse Engineer timing]", {
     taskId,
     label: timing.label,
@@ -1429,59 +2031,172 @@ function handleTaskError(taskId: string, error: unknown): void {
   });
 }
 
+function enqueueTask(
+  task: TaskState,
+  runner: (controller: AbortController) => Promise<void>
+): TaskState {
+  taskRunners.set(task.id, runner);
+  queuedTaskIds.push(task.id);
+  setCurrentTask(task);
+  updateQueuePositions();
+  void pumpTaskQueue();
+  return tasks.get(task.id)!;
+}
+
+async function pumpTaskQueue(): Promise<void> {
+  if (isQueuePumpRunning) {
+    return;
+  }
+
+  isQueuePumpRunning = true;
+
+  try {
+    const settings = await getSettings();
+    const maxConcurrentTasks = settings.maxConcurrentTasks;
+
+    while (getRunningTaskCount() < maxConcurrentTasks && queuedTaskIds.length) {
+      const taskId = queuedTaskIds.shift()!;
+      const task = tasks.get(taskId);
+      const runner = taskRunners.get(taskId);
+
+      if (!task || !runner || task.status !== "queued") {
+        continue;
+      }
+
+      const controller = new AbortController();
+      taskControllers.set(taskId, controller);
+      updateCurrentTask(taskId, {
+        status: task.kind === "edit" ? "running" : "preparing",
+        phase: task.kind === "edit" ? "editing" : "preparing",
+        message: task.kind === "assistant" ? "正在生成提示词" : "正在准备任务",
+        progressPercent: task.kind === "edit" ? 68 : 8,
+        progressLabel: task.kind === "edit" ? "编辑提示词" : "准备任务",
+        progressDetail: "任务已开始",
+        queuePosition: undefined
+      });
+      startHeartbeat(taskId);
+      void runner(controller).finally(() => {
+        taskControllers.delete(taskId);
+        taskRunners.delete(taskId);
+        stopHeartbeat(taskId);
+        updateQueuePositions();
+        void pumpTaskQueue();
+      });
+    }
+
+    updateQueuePositions();
+  } finally {
+    isQueuePumpRunning = false;
+  }
+}
+
+function getRunningTaskCount(): number {
+  return Array.from(tasks.values()).filter(
+    (task) =>
+      task.status === "awaiting_consent" ||
+      task.status === "preparing" ||
+      task.status === "running"
+  ).length;
+}
+
+function updateQueuePositions(): void {
+  queuedTaskIds.forEach((taskId, index) => {
+    const task = tasks.get(taskId);
+
+    if (!task || task.status !== "queued") {
+      return;
+    }
+
+    const nextQueuePosition = index + 1;
+
+    if (task.queuePosition === nextQueuePosition) {
+      return;
+    }
+
+    updateCurrentTask(taskId, {
+      queuePosition: nextQueuePosition,
+      progressDetail: `队列第 ${nextQueuePosition} 位`
+    });
+  });
+}
+
 function setCurrentTask(task: TaskState): void {
+  tasks.set(task.id, task);
   currentTask = task;
+  updateWorkspace(task.workspaceId, { activeTaskId: task.id });
   void broadcast({
     type: "background:task-state",
-    task: currentTask
+    workspaceId: task.workspaceId,
+    task
   });
 }
 
 function updateCurrentTask(taskId: string, updates: Partial<TaskState>): void {
-  if (!currentTask || currentTask.id !== taskId) {
+  const existing = tasks.get(taskId);
+
+  if (!existing) {
     return;
   }
 
-  currentTask = {
-    ...currentTask,
+  const task = {
+    ...existing,
     ...updates,
     updatedAt: new Date().toISOString()
   };
+  tasks.set(taskId, task);
+  currentTask = task;
 
   void broadcast({
     type: "background:task-state",
-    task: currentTask
+    workspaceId: task.workspaceId,
+    task
   });
+
+  if (task.status === "done") {
+    updateWorkspace(task.workspaceId, {
+      activeTaskId: task.id,
+      lastResultTaskId: task.id
+    });
+  }
 }
 
 function startHeartbeat(taskId: string): void {
-  stopHeartbeat();
+  stopHeartbeat(taskId);
 
-  heartbeatTimer = globalThis.setInterval(() => {
-    if (currentTask?.id !== taskId) {
+  const heartbeatTimer = globalThis.setInterval(() => {
+    const task = tasks.get(taskId);
+
+    if (!task || task.status === "done" || task.status === "cancelled" || task.status === "error") {
       stopHeartbeat(taskId);
       return;
     }
 
     void broadcast({
       type: "background:heartbeat",
+      workspaceId: task.workspaceId,
       taskId,
       updatedAt: new Date().toISOString()
     });
   }, HEARTBEAT_INTERVAL_MS);
+
+  heartbeatTimers.set(taskId, heartbeatTimer);
 }
 
 function stopHeartbeat(taskId?: string): void {
+  if (!taskId) {
+    heartbeatTimers.forEach((timer) => globalThis.clearInterval(timer));
+    heartbeatTimers.clear();
+    return;
+  }
+
+  const heartbeatTimer = heartbeatTimers.get(taskId);
+
   if (!heartbeatTimer) {
     return;
   }
 
-  if (taskId && currentTask?.id !== taskId) {
-    return;
-  }
-
   globalThis.clearInterval(heartbeatTimer);
-  heartbeatTimer = undefined;
+  heartbeatTimers.delete(taskId);
 }
 
 async function handleAnalyzeShortcut(tab?: chrome.tabs.Tab): Promise<void> {
@@ -1492,7 +2207,7 @@ async function handleAnalyzeShortcut(tab?: chrome.tabs.Tab): Promise<void> {
     return;
   }
 
-  await openFloatingPanelOrSidePanel(activeTab, "open");
+  const workspace = await openPopupWorkspace(activeTab);
 
   const image = await getLastImageFromContent(activeTab);
 
@@ -1501,12 +2216,13 @@ async function handleAnalyzeShortcut(tab?: chrome.tabs.Tab): Promise<void> {
       createAppError(
         "image_not_found",
         "No recently hovered or right-clicked image was found in this tab."
-      )
+      ),
+      workspace.id
     );
     return;
   }
 
-  await startAnalyzeTask(image);
+  await startAnalyzeTask(image, workspace.id);
 }
 
 async function getLastImageFromContent(
@@ -1532,6 +2248,11 @@ async function openFloatingPanelOrSidePanel(
   tab?: chrome.tabs.Tab,
   mode: "open" | "toggle" = "open"
 ): Promise<void> {
+  if (await isSidePanelSurfaceActive()) {
+    await openPanel(tab);
+    return;
+  }
+
   const didOpenFloatingPanel = await openFloatingPanel(tab, mode);
 
   if (!didOpenFloatingPanel) {
@@ -1593,6 +2314,35 @@ async function openPanel(tab?: chrome.tabs.Tab): Promise<void> {
   }
 }
 
+function markPanelSurfaceSeen(surface: PanelSurface): void {
+  panelSurfaceLastSeenAt[surface] = Date.now();
+}
+
+function markPanelSurfaceClosed(surface: PanelSurface): void {
+  panelSurfaceLastSeenAt[surface] = 0;
+}
+
+async function isSidePanelSurfaceActive(): Promise<boolean> {
+  if (Date.now() - panelSurfaceLastSeenAt.sidepanel <= PANEL_SURFACE_HEARTBEAT_TTL_MS) {
+    return true;
+  }
+
+  try {
+    const contexts = await chrome.runtime.getContexts({
+      contextTypes: [chrome.runtime.ContextType.SIDE_PANEL]
+    });
+
+    if (contexts.length > 0) {
+      markPanelSurfaceSeen("sidepanel");
+      return true;
+    }
+  } catch {
+    // Older Chromium builds may not expose runtime.getContexts.
+  }
+
+  return false;
+}
+
 function isRestrictedUrl(url?: string): boolean {
   if (!url) {
     return false;
@@ -1622,29 +2372,58 @@ function createCapturedImage(
   tab?: chrome.tabs.Tab
 ): CapturedImage {
   return {
-    url: info.srcUrl ?? "",
+    url: getContextImageUrl(info),
     sourcePageUrl: info.pageUrl ?? tab?.url,
     sourceTitle: tab?.title,
     tabId: tab?.id
   };
 }
 
-async function addMixImages(images: CapturedImage[]): Promise<CapturedImage[]> {
-  await loadMixImages();
-  const nextImages = images.filter((image) => image.url.trim());
-  const nextUrls = new Set(nextImages.map((image) => image.url));
-  const withoutDuplicates = mixImages.filter((image) => !nextUrls.has(image.url));
-  mixImages = [...nextImages, ...withoutDuplicates].slice(0, MAX_MIX_IMAGES);
-  await saveMixImages(mixImages);
-  void broadcastMixUpdated();
-  return mixImages;
+function getContextImageUrl(info: chrome.contextMenus.OnClickData): string {
+  if (info.srcUrl) {
+    return info.srcUrl;
+  }
+
+  if (info.linkUrl && isLikelyImageUrl(info.linkUrl)) {
+    return info.linkUrl;
+  }
+
+  return "";
 }
 
-async function setMixImages(images: CapturedImage[]): Promise<CapturedImage[]> {
-  mixImages = images.filter(isCapturedImage).slice(0, MAX_MIX_IMAGES);
-  await saveMixImages(mixImages);
-  void broadcastMixUpdated();
-  return mixImages;
+function isLikelyImageUrl(value: string): boolean {
+  return (
+    /^data:image\//i.test(value) ||
+    /\.(?:avif|gif|jpe?g|png|svg|webp)(?:[?#].*)?$/i.test(value)
+  );
+}
+
+async function addMixImages(
+  images: CapturedImage[],
+  workspaceId: string
+): Promise<CapturedImage[]> {
+  const nextImages = images.filter((image) => image.url.trim());
+  const nextUrls = new Set(nextImages.map((image) => image.url));
+  const currentMixImages = loadWorkspaceMixImages(workspaceId);
+  const withoutDuplicates = currentMixImages.filter((image) => !nextUrls.has(image.url));
+  const nextMixImages = [...nextImages, ...withoutDuplicates].slice(0, MAX_MIX_IMAGES);
+
+  updateWorkspace(workspaceId, { mixImages: nextMixImages });
+  await saveMixImages(nextMixImages, workspaceId);
+  void broadcastMixUpdated(workspaceId);
+  return nextMixImages;
+}
+
+async function setMixImages(
+  images: CapturedImage[],
+  workspaceId: string
+): Promise<CapturedImage[]> {
+  const nextMixImages = images.filter(isCapturedImage).slice(0, MAX_MIX_IMAGES);
+
+  updateWorkspace(workspaceId, { mixImages: nextMixImages });
+  await saveMixImages(nextMixImages, workspaceId);
+  void broadcastMixUpdated(workspaceId);
+  return nextMixImages;
 }
 
 async function createHistoryReferenceImages(
@@ -1708,19 +2487,36 @@ function createFallbackReferenceUrl(url: string): string | undefined {
   return undefined;
 }
 
-async function loadMixImages(): Promise<CapturedImage[]> {
+async function loadMixImages(workspaceId: string): Promise<CapturedImage[]> {
+  const workspace = getWorkspace(workspaceId);
+
+  if (workspace.mixImages.length) {
+    return workspace.mixImages;
+  }
+
+  if (workspaceId !== DEFAULT_WORKSPACE_ID) {
+    return workspace.mixImages;
+  }
+
   const stored = await chrome.storage.local.get(MIX_IMAGES_KEY);
   const images = stored[MIX_IMAGES_KEY];
-
-  mixImages = Array.isArray(images)
+  const nextMixImages = Array.isArray(images)
     ? images.filter(isCapturedImage).slice(0, MAX_MIX_IMAGES)
     : [];
 
-  return mixImages;
+  updateWorkspace(workspaceId, { mixImages: nextMixImages });
+  mixImages = nextMixImages;
+  return nextMixImages;
 }
 
-async function saveMixImages(images: CapturedImage[]): Promise<void> {
-  await chrome.storage.local.set({ [MIX_IMAGES_KEY]: images });
+async function saveMixImages(
+  images: CapturedImage[],
+  workspaceId: string
+): Promise<void> {
+  if (workspaceId === DEFAULT_WORKSPACE_ID) {
+    mixImages = images;
+    await chrome.storage.local.set({ [MIX_IMAGES_KEY]: images });
+  }
 }
 
 function isCapturedImage(value: unknown): value is CapturedImage {
@@ -1740,16 +2536,18 @@ async function broadcast(message: unknown): Promise<void> {
   }
 }
 
-async function broadcastMixUpdated(): Promise<void> {
+async function broadcastMixUpdated(workspaceId: string): Promise<void> {
   await broadcast({
     type: "background:mix-updated",
-    images: mixImages
+    workspaceId,
+    images: loadWorkspaceMixImages(workspaceId)
   });
 }
 
-async function broadcastError(error: unknown): Promise<void> {
+async function broadcastError(error: unknown, workspaceId?: string): Promise<void> {
   await broadcast({
     type: "background:error",
+    workspaceId,
     error: toUserFacingError(error)
   });
 }

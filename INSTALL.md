@@ -1,6 +1,6 @@
 # AI Prompt Reverse Engineer 安装与使用教程
 
-这个插件用于在网页图片或本地图片上反推 AI 生成提示词，并输出中文 Prompt 和结构化 JSON。它也内置双引擎提示词助手，可以把中文想法、参考图、画幅、质量和限制条件整理成 Nano Banana Pro 或 Midjourney V8.1 可直接复制的英文提示词。
+这个插件用于在网页图片或本地图片上反推 AI 生成提示词，并输出中文 Prompt 和结构化 JSON。它也内置提示词助手，可以把中文想法、参考图、画幅、质量和限制条件整理成 Nano Banana Pro / Midjourney V8.1 可直接复制的英文提示词，或 GPT-Image-2 图生图中文提示词。
 
 适用浏览器：
 
@@ -81,6 +81,7 @@ API Key: 你的公司 AI 网关 Bearer Token
 
 - API Key 只保存在你自己的浏览器本地。
 - API Key 不会上传到 GitHub，也不会写入插件代码。
+- 雷火网关模型预设中已包含 `gpt-5.5`，需要使用 GPT-5.5 时可在设置页直接切换模型名称。
 - 如果不知道 API Key，请联系公司内部 AI 网关管理员。
 
 ## 五、选择反推模板
@@ -133,7 +134,7 @@ API Key: 你的公司 AI 网关 Bearer Token
 
 ## 七、使用双引擎提示词助手
 
-提示词助手适合“我已经有创意或参考图，现在想得到一条高质量英文出图 Prompt”的场景。当前支持 `Nano Banana Pro` 和 `Midjourney V8.1` 两个引擎。
+提示词助手适合“我已经有创意或参考图，现在想得到一条高质量出图 Prompt”的场景。当前支持 `Nano Banana Pro`、`Midjourney V8.1` 和 `GPT-Image-2`。
 
 ### 1. 进入助手
 
@@ -147,8 +148,11 @@ API Key: 你的公司 AI 网关 Bearer Token
 | --- | --- |
 | Nano Banana Pro | 适合改图、图文生成、发送到 Photoshop 工作流 |
 | Midjourney V8.1 | 适合生成可直接复制到 Midjourney 的英文 Prompt |
+| GPT-Image-2 | 适合根据 subject_image / reference_image 角色生成图生图中文 optimized_prompt |
 
 Midjourney V8.1 首版默认生成 V8.1 Prompt，会自动输出 `--v 8.1`，并避免输出 V8.1 不支持的 `--q`、`--cref`、`--cw`、`--oref`、`--ow`、`--draft` 和 `::` 多重提示。
+
+GPT-Image-2 模式至少需要一张参考图。只有一张图时按 `reference_image` 处理；多图中“身份参考”和“产品参考”会作为 `subject_image`，其它图片作为视觉 `reference_image`。画幅可以选择 `Auto`，也可以选择固定比例让提示词明确适配目标画幅。
 
 ### 3. 选择任务类型
 
@@ -200,7 +204,7 @@ Midjourney 的最终 Prompt 会把 `--ar`、`--v 8.1`、`--raw`、`--sd/--hd`、
 - 文字参考：参考画面文字、标题样式和字体风格。
 - 材质参考：参考材质、表面处理和细节密度。
 
-如果要保留人物、角色或产品一致性，打开“身份锁定”。它会要求模型不要改年龄、脸型、五官比例、产品结构和核心识别特征。
+如果要在 Nano Banana Pro 或 Midjourney V8.1 中保留人物、角色或产品一致性，打开“身份锁定”。GPT-Image-2 中则把对应参考图标成“身份参考”或“产品参考”，让它作为 `subject_image`。
 
 Midjourney V8.1 下，风格参考会转成 `--sref <url> --sw <weight>`；普通参考图会作为 image prompt 放在开头并使用 `--iw`。本地图片不能直接写进 MJ Prompt，助手会用占位链接并在中文核对里提醒先上传到 Midjourney 或 Discord 获取可用 URL。身份参考不会生成 `--cref/--oref`，因为 V8.1 不支持这些参数。
 
@@ -326,7 +330,7 @@ style=赛博朋克
 
 ```text
 API Base URL 是否为：https://ai.leihuo.netease.com/v1
-Model 是否为：gemini-3.1-pro-preview-customtools
+Model 是否为：gemini-3.1-pro-preview-customtools，或你在雷火网关中选择的 gpt-5.5
 API Key 是否填写正确
 ```
 

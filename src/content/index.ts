@@ -10,6 +10,17 @@ type ContentMessage =
   | { type: "content:toggle-floating-panel" }
   | { type: "content:open-floating-panel" };
 
+interface WorkspaceState {
+  id: string;
+  title: string;
+}
+
+interface RuntimeResponse<T = unknown> {
+  ok: boolean;
+  data?: T;
+  error?: { message?: string };
+}
+
 interface FloatingPanelPrefs {
   left?: number;
   top?: number;
@@ -18,15 +29,19 @@ interface FloatingPanelPrefs {
   collapsed?: boolean;
 }
 
-let lastImage: CapturedImage | null = null;
+let lastHoverImage: CapturedImage | null = null;
+let lastContextMenuImage: CapturedImage | null = null;
+let lastContextMenuAt = 0;
 let floatingPanel: FloatingPanelController | null = null;
 
 const FLOATING_PREF_KEY = "floatingPanelPrefs";
+const CONTEXT_IMAGE_CAPTURE_TTL_MS = 30_000;
 const FLOATING_DEFAULT_WIDTH = 420;
 const FLOATING_DEFAULT_HEIGHT = 720;
 const FLOATING_MIN_WIDTH = 340;
 const FLOATING_MIN_HEIGHT = 520;
 const FLOATING_VIEWPORT_GAP = 12;
+const FLOATING_DETACH_THRESHOLD_PX = 18;
 const COLLAPSED_WIDTH = 56;
 const COLLAPSED_HEIGHT = 44;
 
@@ -35,8 +50,11 @@ document.addEventListener(
   (event) => {
     const image = findImageFromEvent(event);
 
+    lastContextMenuAt = Date.now();
+    lastContextMenuImage = image;
+
     if (image) {
-      lastImage = image;
+      lastHoverImage = image;
     }
   },
   true
@@ -48,7 +66,7 @@ document.addEventListener(
     const image = findImageFromEvent(event);
 
     if (image) {
-      lastImage = image;
+      lastHoverImage = image;
     }
   },
   true
@@ -62,7 +80,7 @@ chrome.runtime.onMessage.addListener(
   ) => {
     if (message.type === "content:get-last-image") {
       sendResponse({
-        image: lastImage ?? undefined
+        image: getLastCapturedImage() ?? undefined
       });
 
       return false;
@@ -81,6 +99,14 @@ chrome.runtime.onMessage.addListener(
     return false;
   }
 );
+
+function getLastCapturedImage(): CapturedImage | null {
+  if (Date.now() - lastContextMenuAt <= CONTEXT_IMAGE_CAPTURE_TTL_MS) {
+    return lastContextMenuImage;
+  }
+
+  return lastHoverImage;
+}
 
 async function toggleFloatingPanel(): Promise<{ ok: boolean }> {
   const panel = await ensureFloatingPanel();
@@ -107,6 +133,7 @@ async function ensureFloatingPanel(): Promise<FloatingPanelController> {
 async function createFloatingPanelController(): Promise<FloatingPanelController> {
   const prefs = await loadFloatingPanelPrefs();
   const state = normalizeFloatingPanelState(prefs);
+  const workspaceId = await createFloatingWorkspaceId();
   const host = document.createElement("prompt-reverse-floating-panel");
   const shadow = host.attachShadow({ mode: "open" });
   const frame = document.createElement("div");
@@ -148,7 +175,7 @@ async function createFloatingPanelController(): Promise<FloatingPanelController>
   collapsedIcon.alt = "";
   collapsedIcon.src = chrome.runtime.getURL("icons/icon-32.png");
   iframe.title = "AI Prompt Reverse Engineer";
-  iframe.src = chrome.runtime.getURL("sidepanel.html?surface=floating");
+  iframe.src = createFloatingPanelUrl(workspaceId);
 
   style.textContent = FLOATING_PANEL_CSS;
   actions.append(collapseButton, closeButton);
@@ -159,17 +186,34 @@ async function createFloatingPanelController(): Promise<FloatingPanelController>
   shadow.append(style, frame);
   getDocumentMount().appendChild(host);
 
-  const controller = new FloatingPanelController(
+  let controller: FloatingPanelController;
+  const handleResize = () => controller.clampToViewport();
+  controller = new FloatingPanelController(
     host,
     frame,
     dragBar,
     resizeHandle,
     collapsedButton,
-    state
+    workspaceId,
+    state,
+    () => {
+      window.removeEventListener("resize", handleResize);
+      floatingPanel = null;
+    }
   );
 
-  collapseButton.addEventListener("click", () => controller.collapse());
-  closeButton.addEventListener("click", () => controller.hide());
+  preventDragFromActionButton(collapseButton);
+  preventDragFromActionButton(closeButton);
+  collapseButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    controller.collapse();
+  });
+  closeButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    controller.close();
+  });
   collapsedButton.addEventListener("click", () => controller.expand());
   frame.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
@@ -177,14 +221,66 @@ async function createFloatingPanelController(): Promise<FloatingPanelController>
       controller.collapse();
     }
   });
-  window.addEventListener("resize", () => controller.clampToViewport());
+  window.addEventListener("resize", handleResize);
 
   controller.open();
   return controller;
 }
 
+function preventDragFromActionButton(button: HTMLButtonElement): void {
+  button.addEventListener("pointerdown", (event) => {
+    event.stopPropagation();
+  });
+}
+
+async function createFloatingWorkspaceId(): Promise<string | undefined> {
+  try {
+    const workspace = await sendRuntimeMessage<WorkspaceState>({
+      type: "panel:create-workspace",
+      surface: "floating",
+      title: createFloatingWorkspaceTitle()
+    });
+
+    return workspace.id;
+  } catch {
+    return undefined;
+  }
+}
+
+function createFloatingPanelUrl(workspaceId?: string): string {
+  const params = new URLSearchParams({ surface: "floating" });
+
+  if (workspaceId) {
+    params.set("workspaceId", workspaceId);
+  }
+
+  return chrome.runtime.getURL(`sidepanel.html?${params.toString()}`);
+}
+
+function createFloatingWorkspaceTitle(): string {
+  const title = document.title.trim();
+
+  if (title) {
+    return `浮窗 · ${title.slice(0, 24)}`;
+  }
+
+  return "浮窗";
+}
+
+async function sendRuntimeMessage<T>(message: unknown): Promise<T> {
+  const response = (await chrome.runtime.sendMessage(message)) as RuntimeResponse<T> | undefined;
+
+  if (!response?.ok) {
+    throw new Error(response?.error?.message ?? "Runtime message failed.");
+  }
+
+  return response.data as T;
+}
+
 class FloatingPanelController {
   private hidden = true;
+  private isClosed = false;
+  private isDetaching = false;
   private state: Required<FloatingPanelPrefs>;
 
   constructor(
@@ -193,7 +289,9 @@ class FloatingPanelController {
     private readonly dragBar: HTMLElement,
     private readonly resizeHandle: HTMLElement,
     private readonly collapsedButton: HTMLButtonElement,
-    state: Required<FloatingPanelPrefs>
+    private readonly workspaceId: string | undefined,
+    state: Required<FloatingPanelPrefs>,
+    private readonly onClose: () => void
   ) {
     this.state = state;
     this.frame.tabIndex = -1;
@@ -245,6 +343,17 @@ class FloatingPanelController {
     this.render();
   }
 
+  close(): void {
+    if (this.isClosed) {
+      return;
+    }
+
+    this.isClosed = true;
+    this.hidden = true;
+    this.host.remove();
+    this.onClose();
+  }
+
   clampToViewport(): void {
     this.state = clampPanelState(this.state);
     this.render();
@@ -284,16 +393,46 @@ class FloatingPanelController {
       this.render();
     };
 
-    const end = () => {
+    const end = (endEvent: PointerEvent) => {
       this.dragBar.removeEventListener("pointermove", move);
       this.dragBar.removeEventListener("pointerup", end);
       this.dragBar.removeEventListener("pointercancel", end);
       void saveFloatingPanelPrefs(this.state);
+
+      if (endEvent.type === "pointerup") {
+        void this.detachIfNearViewportEdge();
+      }
     };
 
     this.dragBar.addEventListener("pointermove", move);
     this.dragBar.addEventListener("pointerup", end);
     this.dragBar.addEventListener("pointercancel", end);
+  }
+
+  private async detachIfNearViewportEdge(): Promise<void> {
+    if (!this.workspaceId || this.isClosed || this.isDetaching || !this.isNearDetachEdge()) {
+      return;
+    }
+
+    this.isDetaching = true;
+
+    try {
+      await sendRuntimeMessage<WorkspaceState>({
+        type: "panel:detach-workspace",
+        workspaceId: this.workspaceId
+      });
+      this.close();
+    } catch {
+      this.isDetaching = false;
+    }
+  }
+
+  private isNearDetachEdge(): boolean {
+    return (
+      this.state.left <= FLOATING_DETACH_THRESHOLD_PX ||
+      this.state.top <= FLOATING_DETACH_THRESHOLD_PX ||
+      this.state.left + this.state.width >= window.innerWidth - FLOATING_DETACH_THRESHOLD_PX
+    );
   }
 
   private startResize(event: PointerEvent): void {

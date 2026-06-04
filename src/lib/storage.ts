@@ -49,6 +49,9 @@ const MAX_ASSISTANT_HISTORY_ITEMS = 20;
 const MAX_ASSISTANT_FAVORITE_ITEMS = 100;
 const MAX_HISTORY_REFERENCE_IMAGES = 6;
 const MAX_HISTORY_INLINE_IMAGE_BYTES = 120_000;
+export const DEFAULT_MAX_CONCURRENT_TASKS = 2;
+export const MIN_MAX_CONCURRENT_TASKS = 1;
+export const MAX_MAX_CONCURRENT_TASKS = 4;
 const LIGHTING_RECIPE_KEYS: AssistantLightingRecipeKey[] = [
   "shadowShapes",
   "shadowTargets",
@@ -97,6 +100,7 @@ export interface ExtensionSettings {
   modelPresets: string[];
   selectedPromptTemplateId: string;
   photoshopBridgeUrl: string;
+  maxConcurrentTasks: number;
 }
 
 export interface PrivacyConsent {
@@ -174,7 +178,8 @@ export function getDefaultSettings(): ExtensionSettings {
     model: DEFAULT_MODEL,
     modelPresets: DEFAULT_MODEL_PRESETS,
     selectedPromptTemplateId: DEFAULT_PROMPT_TEMPLATE_ID,
-    photoshopBridgeUrl: DEFAULT_PHOTOSHOP_BRIDGE_URL
+    photoshopBridgeUrl: DEFAULT_PHOTOSHOP_BRIDGE_URL,
+    maxConcurrentTasks: DEFAULT_MAX_CONCURRENT_TASKS
   };
 }
 
@@ -203,6 +208,10 @@ export async function getSettings(): Promise<ExtensionSettings> {
     ),
     photoshopBridgeUrl: normalizePhotoshopBridgeUrl(
       readString(settings.photoshopBridgeUrl, defaults.photoshopBridgeUrl)
+    ),
+    maxConcurrentTasks: normalizeMaxConcurrentTasks(
+      settings.maxConcurrentTasks,
+      defaults.maxConcurrentTasks
     )
   };
 }
@@ -225,6 +234,10 @@ export async function saveSettings(
       updates.selectedPromptTemplateId ?? current.selectedPromptTemplateId,
     photoshopBridgeUrl: normalizePhotoshopBridgeUrl(
       updates.photoshopBridgeUrl ?? current.photoshopBridgeUrl
+    ),
+    maxConcurrentTasks: normalizeMaxConcurrentTasks(
+      updates.maxConcurrentTasks ?? current.maxConcurrentTasks,
+      current.maxConcurrentTasks
     )
   };
 
@@ -1528,6 +1541,24 @@ function readOptionalString(value: unknown): string | undefined {
 
 function readOptionalNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function normalizeMaxConcurrentTasks(
+  value: unknown,
+  fallback = DEFAULT_MAX_CONCURRENT_TASKS
+): number {
+  const numericValue =
+    typeof value === "number" && Number.isFinite(value)
+      ? value
+      : typeof value === "string" && value.trim()
+        ? Number(value)
+        : fallback;
+  const integerValue = Math.round(Number.isFinite(numericValue) ? numericValue : fallback);
+
+  return Math.min(
+    MAX_MAX_CONCURRENT_TASKS,
+    Math.max(MIN_MAX_CONCURRENT_TASKS, integerValue)
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

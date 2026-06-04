@@ -57,9 +57,17 @@ type ResultView = "prompt" | "json";
 type EditMode = "auto" | "text" | "vision";
 type ResolvedEditMode = "text" | "vision";
 type MultiAnalyzeMode = "style_common" | "batch";
+type PanelSurface = "sidepanel" | "floating" | "popup";
+type PanelSurfaceMessageType =
+  | "panel:surface-mounted"
+  | "panel:surface-heartbeat"
+  | "panel:surface-unmounted";
+
+const PANEL_SURFACE_HEARTBEAT_INTERVAL_MS = 5_000;
 
 type TaskStatus =
   | "idle"
+  | "queued"
   | "awaiting_consent"
   | "preparing"
   | "running"
@@ -88,11 +96,13 @@ interface PreparedImagePayload {
 
 interface TaskState {
   id: string;
-  kind: "analyze" | "edit";
+  workspaceId?: string;
+  kind: "analyze" | "edit" | "assistant";
   status: TaskStatus;
   phase?: string;
   message?: string;
   mode?: "single" | MultiAnalyzeMode;
+  queuePosition?: number;
   createdAt: string;
   updatedAt: string;
   source?: CapturedImage;
@@ -104,6 +114,8 @@ interface TaskState {
   rawText?: string;
   usedJsonMode?: boolean;
   historySaved?: boolean;
+  input?: unknown;
+  assistantResult?: AssistantPromptResult;
   timings?: TaskTimingEntry[];
   progressPercent?: number;
   progressLabel?: string;
@@ -132,6 +144,23 @@ interface AssistantGenerateResponse {
   history: AssistantHistoryItem[];
 }
 
+interface WorkspaceState {
+  id: string;
+  title: string;
+  surface: PanelSurface;
+  windowId?: number;
+  mixImages: CapturedImage[];
+  activeTaskId?: string;
+  lastResultTaskId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface WorkspaceResponse {
+  workspace: WorkspaceState;
+  task: TaskState | null;
+}
+
 interface EditVisualReference {
   imageUrl: string;
   sourceImageUrl?: string;
@@ -145,16 +174,17 @@ interface EditImageReference extends InstructionImageReference {
 }
 
 type BackgroundMessage =
-  | { type: "background:task-state"; task: TaskState }
+  | { type: "background:task-state"; workspaceId?: string; task: TaskState }
   | {
       type: "background:privacy-consent-request";
+      workspaceId?: string;
       taskId: string;
       source?: CapturedImage;
     }
-  | { type: "background:error"; error: UserFacingError }
-  | { type: "background:heartbeat"; taskId: string; updatedAt: string }
+  | { type: "background:error"; workspaceId?: string; error: UserFacingError }
+  | { type: "background:heartbeat"; workspaceId?: string; taskId: string; updatedAt: string }
   | { type: "background:shortcut"; command: string }
-  | { type: "background:mix-updated"; images: CapturedImage[] };
+  | { type: "background:mix-updated"; workspaceId?: string; images: CapturedImage[] };
 
 interface PendingConsent {
   taskId: string;
@@ -162,10 +192,24 @@ interface PendingConsent {
 }
 
 export function App() {
-  const isFloatingSurface = useMemo(
-    () => new URLSearchParams(window.location.search).get("surface") === "floating",
-    []
+  const initialUrlState = useMemo(() => {
+    const params = new URLSearchParams(window.location.search);
+    const surface = params.get("surface");
+
+    return {
+      workspaceId: params.get("workspaceId") || undefined,
+      surface:
+        surface === "floating" || surface === "popup" || surface === "sidepanel"
+          ? surface
+          : "sidepanel"
+    } satisfies { workspaceId?: string; surface: PanelSurface };
+  }, []);
+  const isFloatingSurface = initialUrlState.surface === "floating";
+  const isPopupSurface = initialUrlState.surface === "popup";
+  const [workspaceId, setWorkspaceId] = useState<string | undefined>(
+    initialUrlState.workspaceId
   );
+  const workspaceIdRef = useRef<string | undefined>(initialUrlState.workspaceId);
   const [viewMode, setViewMode] = useState<ViewMode>("workspace");
   const [resultView, setResultView] = useState<ResultView>("prompt");
   const [task, setTask] = useState<TaskState | null>(null);
@@ -192,7 +236,12 @@ export function App() {
   const savedTaskIds = useRef(new Set<string>());
   const activeReferenceImagesRef = useRef<HistoryReferenceImage[]>([]);
 
+  useEffect(() => {
+    workspaceIdRef.current = workspaceId;
+  }, [workspaceId]);
+
   const isBusy =
+    task?.status === "queued" ||
     task?.status === "awaiting_consent" ||
     task?.status === "preparing" ||
     task?.status === "running";
@@ -206,6 +255,10 @@ export function App() {
   }, [task]);
 
   const statusLabel = useMemo(() => {
+    if (task?.status === "queued") {
+      return "排队中";
+    }
+
     if (isBusy) {
       return "处理中";
     }
@@ -373,19 +426,48 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    void sendRuntimeMessage<TaskState | null>({ type: "panel:get-state" })
-      .then((state) => {
-        if (state) {
-          handleTaskState(state);
+    if (!hasExtensionRuntime()) {
+      return undefined;
+    }
+
+    const surface = initialUrlState.surface;
+    sendPanelSurfaceMessage("panel:surface-mounted", surface, workspaceId);
+
+    const heartbeatId = window.setInterval(() => {
+      sendPanelSurfaceMessage("panel:surface-heartbeat", surface, workspaceId);
+    }, PANEL_SURFACE_HEARTBEAT_INTERVAL_MS);
+
+    const handlePageHide = () => {
+      sendPanelSurfaceMessage("panel:surface-unmounted", surface, workspaceId);
+    };
+
+    window.addEventListener("pagehide", handlePageHide);
+
+    return () => {
+      window.clearInterval(heartbeatId);
+      window.removeEventListener("pagehide", handlePageHide);
+      sendPanelSurfaceMessage("panel:surface-unmounted", surface, workspaceId);
+    };
+  }, [initialUrlState.surface, workspaceId]);
+
+  useEffect(() => {
+    void sendRuntimeMessage<WorkspaceResponse>({
+      type: "panel:get-workspace-state",
+      workspaceId: initialUrlState.workspaceId,
+      surface: initialUrlState.surface
+    })
+      .then((response) => {
+        setWorkspaceId(response.workspace.id);
+        setMixImages(response.workspace.mixImages);
+
+        if (response.task) {
+          handleTaskState(response.task);
         }
       })
       .catch(() => undefined);
-    void sendRuntimeMessage<CapturedImage[]>({ type: "panel:get-mix" })
-      .then(setMixImages)
-      .catch(() => undefined);
     void refreshHistory();
     void refreshTemplateState();
-  }, [handleTaskState, refreshHistory, refreshTemplateState]);
+  }, [handleTaskState, initialUrlState.surface, initialUrlState.workspaceId, refreshHistory, refreshTemplateState]);
 
   useEffect(() => {
     if (!hasExtensionRuntime()) {
@@ -393,6 +475,15 @@ export function App() {
     }
 
     const listener = (message: BackgroundMessage) => {
+      if (
+        "workspaceId" in message &&
+        message.workspaceId &&
+        workspaceIdRef.current &&
+        message.workspaceId !== workspaceIdRef.current
+      ) {
+        return;
+      }
+
       if (message.type === "background:task-state") {
         handleTaskState(message.task);
         return;
@@ -779,8 +870,14 @@ export function App() {
 
   return (
     <div
-      className={isFloatingSurface ? "app-shell is-floating-surface" : "app-shell"}
-      data-surface={isFloatingSurface ? "floating" : "sidepanel"}
+      className={
+        isFloatingSurface
+          ? "app-shell is-floating-surface"
+          : isPopupSurface
+            ? "app-shell is-popup-surface"
+            : "app-shell"
+      }
+      data-surface={initialUrlState.surface}
     >
       <header className="app-header">
         <div>
@@ -1354,6 +1451,18 @@ function syncMixImages(images: CapturedImage[]): void {
     type: "panel:set-mix-images",
     images
   }).catch(() => undefined);
+}
+
+function sendPanelSurfaceMessage(
+  type: PanelSurfaceMessageType,
+  surface: PanelSurface,
+  workspaceId?: string
+): void {
+  if (!hasExtensionRuntime()) {
+    return;
+  }
+
+  void chrome.runtime.sendMessage({ type, surface, workspaceId }).catch(() => undefined);
 }
 
 async function sendRuntimeMessage<T>(message: unknown): Promise<T> {

@@ -32,6 +32,14 @@ export function SettingsPanel() {
         ...settings,
         model: customModel.trim() || settings.model
       });
+      if (typeof chrome !== "undefined" && chrome.runtime?.sendMessage) {
+        void chrome.runtime
+          .sendMessage({
+            type: "panel:set-max-concurrency",
+            maxConcurrentTasks: nextSettings.maxConcurrentTasks
+          })
+          .catch(() => undefined);
+      }
       setSettings(nextSettings);
       setSaved(true);
       window.setTimeout(() => setSaved(false), 1400);
@@ -125,6 +133,25 @@ export function SettingsPanel() {
             setSettings({ ...settings, photoshopBridgeUrl: event.target.value })
           }
         />
+      </label>
+
+      <label className="field-label">
+        <span>Concurrent tasks</span>
+        <select
+          value={settings.maxConcurrentTasks}
+          onChange={(event) =>
+            setSettings({
+              ...settings,
+              maxConcurrentTasks: Number(event.target.value)
+            })
+          }
+        >
+          {[1, 2, 3, 4].map((value) => (
+            <option value={value} key={value}>
+              {value}
+            </option>
+          ))}
+        </select>
       </label>
 
       <section className="settings-note">
